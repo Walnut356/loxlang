@@ -7,14 +7,13 @@ class Lox
 
     static void Main(string[] args)
     {
-        Console.WriteLine(IsDigit('.'));
         switch (args.Length)
         {
             case 0:
-                runPrompt();
+                RunPrompt();
                 break;
             case 1:
-                runFile(args[0]);
+                RunFile(args[0]);
                 break;
             default:
                 Console.WriteLine("Requires 0 or 1 args");
@@ -22,26 +21,26 @@ class Lox
         }
     }
 
-    static void runFile(String path)
+    static void RunFile(String path)
     {
         string stream = File.ReadAllText(path);
-        run(stream);
+        Run(stream);
         if (had_error) throw new MalformedLineException();
     }
 
-    static void runPrompt()
+    static void RunPrompt()
     {
         while (true)
         {
             Console.Write("> ");
             var line = Console.ReadLine();
             if (line == "") break;
-            run(line);
+            Run(line);
             had_error = false;
         }
     }
 
-    static void run(string code)
+    static void Run(string code)
     {
         var tokens = new Scanner(code).ScanTokens();
 
@@ -51,12 +50,12 @@ class Lox
         }
     }
 
-    public static void error(int line, string msg)
+    public static void Error(int line, string msg)
     {
-        report(line, "", msg);
+        Report(line, "", msg);
     }
 
-    static void report(int line, string loc, string msg)
+    static void Report(int line, string loc, string msg)
     {
         Console.WriteLine($"[line {line}] Error {loc}: {msg}");
         had_error = true;

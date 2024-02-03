@@ -68,7 +68,7 @@ public class Scanner
                     }
                     else
                     {
-                        Lox.error(line, $"Unexpected character: {c}");
+                        Lox.Error(line, $"Unexpected character: {c}");
                     }
                     break;
             }
@@ -84,16 +84,20 @@ public class Scanner
         tokens.Add(new Token(type, text, literal, line));
     }
 
-    bool Match(char c) {
+    bool Match(char c)
+    {
         if (i < code.Length && code[i] != c) return false;
 
         i++;
         return true;
     }
 
-    void StrLiteral() {
-        while(i < code.Length && code[i] != '"') {
-            switch (code[i]) {
+    void StrLiteral()
+    {
+        while (i < code.Length && code[i] != '"')
+        {
+            switch (code[i])
+            {
                 case '\n': line++; break;
 
             }
@@ -101,8 +105,9 @@ public class Scanner
             i++;
         }
 
-        if (i == code.Length) {
-            Lox.error(line, "Undetermined string");
+        if (i == code.Length)
+        {
+            Lox.Error(line, "Undetermined string");
             return;
         }
         i++;
@@ -111,13 +116,16 @@ public class Scanner
 
     }
 
-    void NumLiteral() {
+    void NumLiteral()
+    {
 
-        while (i < code.Length && IsDigit(code[i])) {
+        while (i < code.Length && IsDigit(code[i]))
+        {
             i++;
         }
 
-        if (code[i] == '.' && i + 1 < code.Length && IsDigit(code[i + 1])) {
+        if (code[i] == '.' && i + 1 < code.Length && IsDigit(code[i + 1]))
+        {
             i++;
             while (i < code.Length && IsDigit(code[i]))
             {
@@ -147,14 +155,19 @@ public class Scanner
         {"while", WHILE},
     };
 
-    void AddIdentifier() {
-        while (i < code.Length && IsAlpha(code[i]) || IsDigit(code[i]) || code[i] == '_') {
+    void AddIdentifier()
+    {
+        while (i < code.Length && IsAlpha(code[i]) || IsDigit(code[i]) || code[i] == '_')
+        {
             i++;
         }
 
-        if (keywords.TryGetValue(code[start..i], out var type)) {
+        if (keywords.TryGetValue(code[start..i], out var type))
+        {
             AddToken(type);
-        } else {
+        }
+        else
+        {
             AddToken(IDENTIFIER);
         }
     }

@@ -52,10 +52,10 @@ enum TokenCat
 }
 
 public class Token {
-    TokenType type;
-    string token;
-    object? literal;
-    int line;
+    public TokenType type;
+    public string token;
+    public object? literal;
+    public int line;
 
     public Token(TokenType type, string token, object? literal, int line) {
         this.type = type;
