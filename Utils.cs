@@ -9,4 +9,25 @@ static class Utils {
             return (u8)((u8)(c & 0b1101_1111) - 65) < 26;
         }
     }
+
+    public static bool Truthy(object o)
+    {
+        if (o is null) return false;
+        if (o is bool) return (bool)o;
+        // wow I kinda hate this truthy-ness rule, specifically because 0 should never equal true.
+        // I'm not a huge fan of other language's either. Implicit casting of strings/arrays gets
+        // weird. I don't like rust's either though because implict casting 0 and <not 0>
+        // into false and true respectively is pretty reasonable
+        return true;
+    }
+
+    public static bool Equal(object lhs, object rhs) {
+        return (lhs, rhs) switch
+        {
+            (null, null) => true,
+            (null, _) => false,
+            (_, null) => false,
+            (var l, var r) => l == r,
+        };
+    }
 }
