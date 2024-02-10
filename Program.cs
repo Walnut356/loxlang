@@ -44,15 +44,26 @@ class Lox
     {
         var tokens = new Scanner(code).ScanTokens();
 
-        foreach (var token in tokens)
-        {
-            Console.WriteLine(token);
-        }
+        Parser parser = new Parser(tokens);
+
+        Expr? expression = parser.Parse();
+
+        if (had_error) return;
+
+        Console.WriteLine(expression.PrettyPrint());
     }
 
     public static void Error(int line, string msg)
     {
         Report(line, "", msg);
+    }
+
+    public static void Error(Token t, string msg) {
+        if (t.type == TokenType.EOF) {
+            Report(t.line, " at end", msg);
+        } else {
+            Report(t.line, "at '" + t.literal + "'", msg);
+        }
     }
 
     static void Report(int line, string loc, string msg)

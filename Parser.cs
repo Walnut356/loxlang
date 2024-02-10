@@ -1,75 +1,77 @@
+using System.Text.RegularExpressions;
 using static TokenType;
 
 class Parser {
     List<Token> tokens;
     int i = 0;
 
-
-
     public Parser(List<Token> tokens) {
         this.tokens = tokens;
+    }
+
+    public Expr? Parse() {
+        try {
+            return Expression();
+        } catch (ParseError error) {
+            Console.WriteLine(error);
+            return null;
+        }
     }
 
     Expr Expression() {
         return Equality();
     }
 
-    static readonly TokenType[] N_EQ = [NOT_EQ, EQ];
-
     Expr Equality() {
-        Expr left = Comparison();
+        Expr expression = Comparison();
 
-        Expr? expression = null;
         while (tokens[i].type is NOT_EQ or EQ) {
             Token op = tokens[i];
             ++i;
             Expr right = Comparison();
-            expression = new Binary(left, op, right);
+            expression = new Binary(expression, op, right);
         }
 
         return expression!;
     }
 
     Expr Comparison() {
-        Expr left = Term();
+        Expr expression = Term();
 
-        Expr? expression = null;
         while (tokens[i].type is GT or LT or GTE or LTE)
         {
             Token op = tokens[i];
             ++i;
             Expr right = Term();
-            expression = new Binary(left, op, right);
+            expression = new Binary(expression, op, right);
         }
 
         return expression!;
     }
 
     Expr Term() {
-        Expr left = Factor();
+        Expr expression = Factor();
 
-        Expr? expression = null;
         while (tokens[i].type is MINUS or PLUS)
         {
             Token op = tokens[i];
             ++i;
             Expr right = Factor();
-            expression = new Binary(left, op, right);
+            expression = new Binary(expression, op, right);
         }
 
         return expression!;
     }
 
     Expr Factor() {
-        Expr left = Unary();
+        Expr expression = Unary();
 
-        Expr? expression = null;
         while (tokens[i].type is ASTERISK or FWDSLASH)
         {
             Token op = tokens[i];
             ++i;
             Expr right = Unary();
-            expression = new Binary(left, op, right);
+            expression = new Binary(expression, op, right);
         }
 
         return expression!;
@@ -80,6 +82,7 @@ class Parser {
     Expr Unary() {
         if (NEG.Contains(tokens[i].type)) {
             Token op = tokens[i];
+            i++;
             Expr right = Unary();
             return new Unary(op, right);
         }
@@ -88,7 +91,9 @@ class Parser {
     }
 
     Expr Primary() {
-        switch (tokens[i].type) {
+        var token = tokens[i];
+        i++;
+        switch (token.type) {
             case FALSE:
                 return new Literal(false);
             case TRUE:
@@ -96,21 +101,50 @@ class Parser {
             case NIL:
                 return new Literal(null);
             case NUMBER:
-                return new Literal(tokens[i].literal);
+                return new Literal(token.literal);
             case STRING:
-                return new Literal(tokens[i].literal);
+                return new Literal(token.literal);
             case PAREN_O:
                 Expr expr = Expression();
-                if (tokens[i].type != PAREN_C) {
-                    throw new Exception($"Expected close paren, got {tokens[i]}");
-                }
-                i++;
+                Expect(PAREN_C, "Expected ')' after expression.");
                 return new Grouping(expr);
+            default:
+                throw Error(token, "Expected expression");
         }
     }
 
 
     bool EOF() {
         return tokens[i].type == TokenType.EOF;
+    }
+
+    void Expect(TokenType t, string message) {
+        if (tokens[i].type != t) { throw Error(tokens[i], message); }
+        ++i;
+    }
+
+    class ParseError : Exception { }
+
+    ParseError Error(Token token, string message) {
+        Lox.Error(token, message);
+        return new ParseError();
+    }
+
+    void Sync() {
+        while (!EOF()) {
+            if (tokens[i - 1].type == SEMICOLON) return;
+            switch (tokens[i + 1].type) {
+                case CLASS:
+                case FUN:
+                case VAR:
+                case FOR:
+                case IF:
+                case WHILE:
+                case PRINT:
+                case RETURN:
+                    return;
+            }
+            i++;
+        }
     }
 }

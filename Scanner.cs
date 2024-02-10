@@ -124,7 +124,7 @@ public class Scanner
             i++;
         }
 
-        if (code[i] == '.' && i + 1 < code.Length && IsDigit(code[i + 1]))
+        if (i < code.Length && code[i] == '.' && i + 1 < code.Length && IsDigit(code[i + 1]))
         {
             i++;
             while (i < code.Length && IsDigit(code[i]))
