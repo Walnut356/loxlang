@@ -136,7 +136,8 @@ public class Scanner
         AddToken(NUMBER, f64.Parse(code[start..i]));
     }
 
-    static readonly Dictionary<string, TokenType> keywords = new Dictionary<string, TokenType> {
+    static readonly Dictionary<string, TokenType> keywords = new()
+    {
         {"and", AND},
         {"class", CLASS},
         {"else", ELSE},

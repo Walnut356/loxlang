@@ -30,4 +30,32 @@ static class Utils {
             (var l, var r) => l == r,
         };
     }
+
+    public static void AssertNumber(Token op, object operand) {
+        if (operand is double) { return; }
+        throw new RuntimeError(op, "Operand must be a number.");
+    }
+
+    public static void AssertNumber(Token op, object lhs, object rhs)
+    {
+        if (lhs is double && rhs is double) { return; }
+        throw new RuntimeError(op, "Operands must be numbers.");
+    }
+
+    /// <summary>
+    /// Returns a Lox-formatted string representing the given value
+    /// </summary>
+    /// <returns></returns>
+    public static string LoxString(object? o) {
+        if (o is null) return "nil";
+        if (o is double) {
+            var temp = o.ToString();
+            if (temp.EndsWith(".0")) {
+                temp = temp.Substring(0, temp.Length - 2);
+            }
+            return temp;
+        }
+
+        return o.ToString()!;
+    }
 }

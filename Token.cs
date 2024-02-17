@@ -51,18 +51,12 @@ enum TokenCat
     Literal,
 }
 
-public class Token {
-    public TokenType type;
-    public string token;
-    public object? literal;
-    public int line;
-
-    public Token(TokenType type, string token, object? literal, int line) {
-        this.type = type;
-        this.token = token;
-        this.literal = literal;
-        this.line = line;
-    }
+public class Token(TokenType type, string token, object? literal, int line)
+{
+    public TokenType type = type;
+    public string token = token;
+    public object? literal = literal;
+    public int line = line;
 
     public override string ToString() {
         return $"{type} {token} {literal}";

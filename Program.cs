@@ -4,6 +4,8 @@ using static Utils;
 class Lox
 {
     static bool had_error = false;
+    static bool had_rt_error = false;
+    static Interpreter interpreter = new();
 
     static void Main(string[] args)
     {
@@ -25,7 +27,8 @@ class Lox
     {
         string stream = File.ReadAllText(path);
         Run(stream);
-        if (had_error) throw new MalformedLineException();
+        if (had_error) Environment.Exit(65);
+        if (had_rt_error) Environment.Exit(70);
     }
 
     static void RunPrompt()
@@ -43,14 +46,12 @@ class Lox
     static void Run(string code)
     {
         var tokens = new Scanner(code).ScanTokens();
-
         Parser parser = new Parser(tokens);
-
-        Expr? expression = parser.Parse();
+        List<Stmt> stmts = parser.Parse();
 
         if (had_error) return;
 
-        Console.WriteLine(expression.PrettyPrint());
+        interpreter.Interpret(stmts);
     }
 
     public static void Error(int line, string msg)
@@ -58,11 +59,15 @@ class Lox
         Report(line, "", msg);
     }
 
-    public static void Error(Token t, string msg) {
-        if (t.type == TokenType.EOF) {
-            Report(t.line, " at end", msg);
-        } else {
-            Report(t.line, "at '" + t.literal + "'", msg);
+    public static void Error(Token t, string msg)
+    {
+        if (t.type == TokenType.EOF)
+        {
+            Report(t.line, "at end", msg);
+        }
+        else
+        {
+            Report(t.line, "at '" + t.token + "'", msg);
         }
     }
 
@@ -70,5 +75,11 @@ class Lox
     {
         Console.WriteLine($"[line {line}] Error {loc}: {msg}");
         had_error = true;
+    }
+
+    public static void RuntimeError(RuntimeError e)
+    {
+        Console.Error.WriteLine("[line " + e.token.line + "] Error: " + e.Message);
+        had_rt_error = true;
     }
 }
