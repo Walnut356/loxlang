@@ -1,11 +1,13 @@
 using static Utils;
 
-public interface Stmt
+namespace Stmt;
+
+public interface Any
 {
     void Execute(Env env);
 }
 
-public record PrintStmt(Expr expression) : Stmt
+public record Print(Expr.Any expression) : Any
 {
     public void Execute(Env env)
     {
@@ -13,7 +15,7 @@ public record PrintStmt(Expr expression) : Stmt
     }
 }
 
-public record ExprStmt(Expr expression) : Stmt
+public record Expression(Expr.Any expression) : Any
 {
     public void Execute(Env env)
     {
@@ -21,7 +23,7 @@ public record ExprStmt(Expr expression) : Stmt
     }
 }
 
-public record VarStmt(Token ident, Expr? init) : Stmt
+public record Var(Token ident, Expr.Any? init) : Any
 {
     public void Execute(Env env)
     {
@@ -31,7 +33,7 @@ public record VarStmt(Token ident, Expr? init) : Stmt
     }
 }
 
-public record BlockStmt(List<Stmt> stmts) : Stmt
+public record Block(List<Any> stmts) : Any
 {
     public void Execute(Env env)
     {
@@ -46,6 +48,21 @@ public record BlockStmt(List<Stmt> stmts) : Stmt
         finally
         {
 
+        }
+    }
+}
+
+public record If(Expr.Any cond, Any if_block, Any? else_block) : Any
+{
+    public void Execute(Env env)
+    {
+        if (Truthy(cond))
+        {
+            if_block.Execute(env);
+        }
+        else
+        {
+            else_block?.Execute(env);
         }
     }
 }

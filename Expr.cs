@@ -1,7 +1,12 @@
 using static TokenType;
 using static Utils;
 
-public interface Expr
+namespace Expr;
+
+/// <summary>
+///  Represents any Expression
+/// </summary>
+public interface Any
 {
     // visitor pattern is really gross. I could make this a big switch statement, but it's really
     // not that much easier than just writing out the impl for each function. It's small-scale
@@ -10,7 +15,7 @@ public interface Expr
     public object? Evaluate(Env env);
 }
 
-public record Binary(Expr left, Token op, Expr right) : Expr
+public record Binary(Any left, Token op, Any right) : Any
 {
     public object? Evaluate(Env env)
     {
@@ -62,7 +67,7 @@ public record Binary(Expr left, Token op, Expr right) : Expr
     }
 }
 
-public record Grouping(Expr expression) : Expr
+public record Grouping(Any expression) : Any
 {
     public object? Evaluate(Env env)
     {
@@ -77,7 +82,7 @@ public record Grouping(Expr expression) : Expr
 
 }
 
-public record Literal(object? value) : Expr
+public record Literal(object? value) : Any
 {
     public string PrettyPrint()
     {
@@ -91,7 +96,7 @@ public record Literal(object? value) : Expr
     }
 }
 
-public record Unary(Token op, Expr right) : Expr
+public record Unary(Token op, Any right) : Any
 {
     public string PrettyPrint()
     {
@@ -116,7 +121,7 @@ public record Unary(Token op, Expr right) : Expr
     }
 }
 
-public record Variable(Token ident) : Expr
+public record Variable(Token ident) : Any
 {
     public object? Evaluate(Env env)
     {
@@ -129,7 +134,7 @@ public record Variable(Token ident) : Expr
     }
 }
 
-public record Assign(Token ident, Expr val) : Expr
+public record Assign(Token ident, Any val) : Any
 {
     public object? Evaluate(Env env)
     {
@@ -141,5 +146,36 @@ public record Assign(Token ident, Expr val) : Expr
     public string PrettyPrint()
     {
         throw new NotImplementedException();
+    }
+}
+
+public record Logical(Any left, Token op, Any right) : Any
+{
+    public object? Evaluate(Env env)
+    {
+        var lhs = left.Evaluate(env);
+        // I dislike this just like i dislike the truthy-ness rule. Logical operators should return
+        // logical values - i.e. boolean values. The given logic is like adding 2 ints and getting
+        // a string. Even if the answer is right ("2"), it's still not the type of value you'd
+        // inuitively expect.  But it *can* return boolean values if l or r are already bools.
+        // That means a logical operator can return 4 types: Some(object), Null, true, or false. So
+        //  now, an expression that usually returns 1 of 2 possibilities essentially returns void*
+
+        // Technically Some(object) could "contain" true and false, but imo they're separate
+        // categories. Some/None is the existance/absence of an object. True or false is a value.
+        // By equating false and nil, you imply that they have the same semantic meaning - that
+        // the *absence* of an object is the same thing as an existing  statement being incorrect
+        // which is silly.
+
+        return op.type switch
+        {
+            OR => Truthy(lhs) ? lhs : right.Evaluate(env),
+            AND => Truthy(lhs) ? right.Evaluate(env) : lhs,
+        };
+    }
+
+    public string PrettyPrint()
+    {
+        return $"({op.token} {left.PrettyPrint()} {right.PrettyPrint()})";
     }
 }

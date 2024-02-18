@@ -6,7 +6,7 @@ class Interpreter
     // maybe make this static later? That way it doesn't need to be passed around constantly
     Env env = new();
 
-    public void Interpret(List<Stmt> stmts)
+    public void Interpret(List<Stmt.Any> stmts)
     {
         try
         {

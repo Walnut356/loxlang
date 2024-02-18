@@ -1,156 +1,208 @@
 using static TokenType;
 
-class Parser {
+class Parser
+{
     List<Token> tokens;
     int i = 0;
 
-    public Parser(List<Token> tokens) {
+    public Parser(List<Token> tokens)
+    {
         this.tokens = tokens;
     }
 
-    public List<Stmt> Parse() {
-        List<Stmt> stmts = [];
-        while (!EOF()) {
+    public List<Stmt.Any> Parse()
+    {
+        List<Stmt.Any> stmts = [];
+        while (!EOF())
+        {
             stmts.Add(Declaration());
         }
 
         return stmts;
     }
 
-    Expr Expression() {
+    Expr.Any Expression()
+    {
         return Assignment();
     }
 
-    Expr Assignment() {
-        Expr expr = Equality();
+    Expr.Any Assignment()
+    {
+        Expr.Any expr = Or();
 
-        if (tokens[i].type is EQ) {
-            Token prev = tokens[i];
+        if (tokens[i].type is EQ)
+        {
+            Token location = tokens[i];
             i++;
-            Expr val = Assignment();
+            Expr.Any val = Assignment();
 
-            if (expr is Variable variable) {
+            if (expr is Expr.Variable variable)
+            {
                 Token ident = variable.ident;
-                return new Assign(ident, val);
+                return new Expr.Assign(ident, val);
             }
 
-            Lox.Error(prev, "Invalid assignment target.");
+            Lox.Error(location, "Invalid assignment target.");
         }
 
         return expr;
     }
 
-    Expr Equality() {
-        Expr expression = Comparison();
+    Expr.Any Or() {
+        Expr.Any expr = And();
 
-        while (tokens[i].type is NOT_EQ or DBL_EQ) {
+        while (tokens[i].type == OR) {
+            Token op = tokens[i];
+            i++;
+
+            Expr.Any right = And();
+            expr = new Expr.Logical(expr, op, right);
+        }
+
+        return expr;
+    }
+
+    Expr.Any And() {
+        Expr.Any expr = Equality();
+
+        while (tokens[i].type == AND)
+        {
+            Token op = tokens[i];
+            i++;
+
+            Expr.Any right = Equality();
+            expr = new Expr.Logical(expr, op, right);
+        }
+
+        return expr;
+    }
+
+    Expr.Any Equality()
+    {
+        Expr.Any expression = Comparison();
+
+        while (tokens[i].type is NOT_EQ or DBL_EQ)
+        {
             Token op = tokens[i];
             ++i;
-            Expr right = Comparison();
-            expression = new Binary(expression, op, right);
+            Expr.Any right = Comparison();
+            expression = new Expr.Binary(expression, op, right);
         }
 
         return expression!;
     }
 
-    Expr Comparison() {
-        Expr expression = Term();
+    Expr.Any Comparison()
+    {
+        Expr.Any expression = Term();
 
         while (tokens[i].type is GT or LT or GTE or LTE)
         {
             Token op = tokens[i];
             ++i;
-            Expr right = Term();
-            expression = new Binary(expression, op, right);
+            Expr.Any right = Term();
+            expression = new Expr.Binary(expression, op, right);
         }
 
         return expression!;
     }
 
-    Expr Term() {
-        Expr expression = Factor();
+    Expr.Any Term()
+    {
+        Expr.Any expression = Factor();
 
         while (tokens[i].type is MINUS or PLUS)
         {
             Token op = tokens[i];
             ++i;
-            Expr right = Factor();
-            expression = new Binary(expression, op, right);
+            Expr.Any right = Factor();
+            expression = new Expr.Binary(expression, op, right);
         }
 
         return expression!;
     }
 
-    Expr Factor() {
-        Expr expression = Unary();
+    Expr.Any Factor()
+    {
+        Expr.Any expression = Unary();
 
         while (tokens[i].type is ASTERISK or FWDSLASH)
         {
             Token op = tokens[i];
             ++i;
-            Expr right = Unary();
-            expression = new Binary(expression, op, right);
+            Expr.Any right = Unary();
+            expression = new Expr.Binary(expression, op, right);
         }
 
         return expression!;
     }
 
-    Expr Unary() {
-        if (tokens[i].type is NOT or MINUS) {
+    Expr.Any Unary()
+    {
+        if (tokens[i].type is NOT or MINUS)
+        {
             Token op = tokens[i];
             i++;
-            Expr right = Unary();
-            return new Unary(op, right);
+            Expr.Any right = Unary();
+            return new Expr.Unary(op, right);
         }
 
         return Primary();
     }
 
-    Expr Primary() {
+    Expr.Any Primary()
+    {
         var token = tokens[i];
         i++;
-        switch (token.type) {
+        switch (token.type)
+        {
             case FALSE:
-                return new Literal(false);
+                return new Expr.Literal(false);
             case TRUE:
-                return new Literal(true);
+                return new Expr.Literal(true);
             case NIL:
-                return new Literal(null);
+                return new Expr.Literal(null);
             case NUMBER:
-                return new Literal(token.literal);
+                return new Expr.Literal(token.literal);
             case STRING:
-                return new Literal(token.literal);
+                return new Expr.Literal(token.literal);
             case PAREN_O:
-                Expr expr = Expression();
+                Expr.Any expr = Expression();
                 Expect(PAREN_C, "Expected ')' after expression.");
-                return new Grouping(expr);
+                return new Expr.Grouping(expr);
             case IDENTIFIER:
-                return new Variable(token);
+                return new Expr.Variable(token);
             default:
                 throw Error(token, "Expected expression");
         }
     }
 
-    bool EOF() {
+    bool EOF()
+    {
         return i >= tokens.Count || tokens[i].type == TokenType.EOF;
     }
 
-    void Expect(TokenType t, string message) {
+    void Expect(TokenType t, string message)
+    {
         if (tokens[i].type != t) { throw Error(tokens[i], message); }
         ++i;
     }
 
     class ParseError : Exception { }
 
-    ParseError Error(Token token, string message) {
+    ParseError Error(Token token, string message)
+    {
         Lox.Error(token, message);
         return new ParseError();
     }
 
-    void Sync() {
-        while (!EOF()) {
+    void Sync()
+    {
+        while (!EOF())
+        {
             if (tokens[i - 1].type == SEMICOLON) return;
-            switch (tokens[i + 1].type) {
+            switch (tokens[i + 1].type)
+            {
                 case CLASS:
                 case FUN:
                 case VAR:
@@ -165,17 +217,19 @@ class Parser {
         }
     }
 
-    Stmt Statement() {
+    Stmt.Any Statement()
+    {
         var token = tokens[i];
         return token.type switch
         {
+            IF => IfStmt(),
             PRINT => PrintStmt(),
-            BRACKET_O => new BlockStmt(Block()),
+            BRACKET_O => new Stmt.Block(Block()),
             _ => ExprStmt(),
         };
     }
 
-    Stmt Declaration()
+    Stmt.Any Declaration()
     {
         try
         {
@@ -193,44 +247,63 @@ class Parser {
         }
     }
 
-    Stmt PrintStmt() {
+    Stmt.Any PrintStmt()
+    {
         i++;
-        Expr val = Expression();
+        Expr.Any val = Expression();
         Expect(SEMICOLON, "Expected semicolon after value of print statement");
-        return new PrintStmt(val);
+        return new Stmt.Print(val);
     }
 
-    Stmt ExprStmt() {
-        Expr val = Expression();
+    Stmt.Any ExprStmt()
+    {
+        Expr.Any val = Expression();
         Expect(SEMICOLON, "Expected semicolon after expression");
-        return new ExprStmt(val);
+        return new Stmt.Expression(val);
     }
 
-    Stmt VarDecl() {
+    Stmt.Any VarDecl()
+    {
         i++;
         Expect(IDENTIFIER, "Expected a variable name.");
         Token ident = tokens[i - 1];
 
-        Expr init = null;
+        Expr.Any init = null;
 
-        if (tokens[i].type == EQ) {
+        if (tokens[i].type == EQ)
+        {
             i++;
             init = Expression();
         }
 
         Expect(SEMICOLON, "Expected semicolon after var declaration");
-        return new VarStmt(ident, init);
+        return new Stmt.Var(ident, init);
     }
 
-    List<Stmt> Block() {
-        List<Stmt> stmts = [];
+    List<Stmt.Any> Block()
+    {
+        List<Stmt.Any> stmts = [];
         i++;
 
-        while (!(tokens[i].type == BRACKET_C) && !EOF()) {
+        while (!(tokens[i].type == BRACKET_C) && !EOF())
+        {
             stmts.Add(Declaration());
         }
 
         Expect(BRACKET_C, "Expected '}' to close block");
         return stmts;
+    }
+
+    Stmt.Any IfStmt()
+    {
+        Expect(PAREN_O, "Expected '(' after 'if'.");
+        Expr.Any cond = Expression();
+        Expect(PAREN_C, "Expected ')' after 'if' condition");
+
+        Stmt.Any if_block = Statement();
+        i++;
+        Stmt.Any? else_block = tokens[i - 1].type is ELSE ? Statement() : null;
+
+        return new Stmt.If(cond, if_block, else_block);
     }
 }
