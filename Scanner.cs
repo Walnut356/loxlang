@@ -40,15 +40,26 @@ public class Scanner
                 case '>': AddToken(Match('=') ? GTE : GT); break;
                 case '/':
                     {
-                        var token = FWDSLASH;
+
                         if (i < code.Length && code[i] == '/')
                         {
                             while (i < code.Length && code[i] != '\n') i++;
                             i++;
+                        } else if (i < code.Length && code[i] == '*') {
+                            i += 2;
+                            var nesting = 1;
+                            while (nesting > 0 && i < code.Length) {
+                                if (code[i - 1] == '/' && code[i] == '*') {
+                                    nesting += 1;
+                                } else if (code [i - 1] == '*' && code[i] == '/') {
+                                    nesting -= 1;
+                                }
+                                ++i;
+                            }
                         }
                         else
                         {
-                            AddToken(token);
+                            AddToken(FWDSLASH);
                         }
                     }
                     break;

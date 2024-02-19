@@ -2,6 +2,10 @@
 // var a = 15;
 /*
     and block comments
+    /*
+        and nested blocks
+        var a = 30;
+    */
     var a = 20;
 */
 
