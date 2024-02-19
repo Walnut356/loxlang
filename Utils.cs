@@ -10,7 +10,7 @@ static class Utils {
         }
     }
 
-    public static bool Truthy(object o)
+    public static bool Truthy(object? o)
     {
         if (o is null) return false;
         if (o is bool) return (bool)o;

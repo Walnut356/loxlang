@@ -66,3 +66,13 @@ public record If(Expr.Any cond, Any if_block, Any? else_block) : Any
         }
     }
 }
+
+public record While(Expr.Any cond, Any block) : Any
+{
+    public void Execute(Env env)
+    {
+        while (Truthy(cond.Evaluate(env))) {
+            block.Execute(env);
+        }
+    }
+}

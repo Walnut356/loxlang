@@ -48,6 +48,7 @@ public record Env()
         if (vars.TryGetValue(ident.token, out var _))
         {
             vars[ident.token] = val;
+            return;
         }
         Env? temp = parent;
         while (temp is not null)
@@ -55,6 +56,7 @@ public record Env()
             if (temp.vars.TryGetValue(ident.token, out _))
             {
                 temp.vars[ident.token] = val;
+                return;
             }
             temp = temp.parent;
         }

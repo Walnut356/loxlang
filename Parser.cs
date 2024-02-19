@@ -222,6 +222,7 @@ class Parser
         var token = tokens[i];
         return token.type switch
         {
+            FOR => ForStmt(),
             IF => IfStmt(),
             PRINT => PrintStmt(),
             BRACKET_O => new Stmt.Block(Block()),
@@ -305,5 +306,37 @@ class Parser
         Stmt.Any? else_block = tokens[i - 1].type is ELSE ? Statement() : null;
 
         return new Stmt.If(cond, if_block, else_block);
+    }
+
+    Stmt.Any ForStmt() {
+        i++;
+        Expect(PAREN_O, "Expected '(' for For loop condition");
+
+        Stmt.Any? init = tokens[i].type switch
+        {
+            SEMICOLON => null,
+            VAR => VarDecl(),
+            _ => ExprStmt(),
+        };
+
+        Expr.Any? cond = tokens[i].type == SEMICOLON ? null : Expression();
+        Expect(SEMICOLON, "Expected ';' after loop condition");
+
+        Expr.Any? incr = tokens[i].type == PAREN_C ? null : Expression();
+        Expect(PAREN_C, "Expected ')' after For loop clauses");
+
+        Stmt.Any block = Statement();
+
+        if (incr is not null) {
+            block = new Stmt.Block([block, new Stmt.Expression(incr)]);
+        }
+
+        block = new Stmt.While(cond ?? new Expr.Literal(true), block);
+
+        if (init is not null) {
+            block = new Stmt.Block([init, block]);
+        }
+
+        return block;
     }
 }
