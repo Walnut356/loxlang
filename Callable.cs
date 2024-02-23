@@ -21,7 +21,7 @@ public class Anon(int _arity, Func<Interpreter, object> _call) : Any
     }
 }
 
-public class Func(Stmt.Function inner) : Any
+public class Func(Stmt.Function inner, Env closure) : Any
 {
     public int Arity()
     {
@@ -30,7 +30,7 @@ public class Func(Stmt.Function inner) : Any
 
     public object? Call(Interpreter interp, List<object?> args)
     {
-        Env env = new(interp.globals);
+        Env env = new(closure);
 
         foreach ((var p, var a) in inner.parameters.Zip(args))
         {
@@ -57,7 +57,7 @@ public class Func(Stmt.Function inner) : Any
         {
             interp.env = prev;
         }
-        
+
         return result;
     }
 

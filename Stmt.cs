@@ -83,7 +83,7 @@ public record Function(Token ident, List<Token> parameters, List<Any> block) : A
 {
     public void Execute(Interpreter interp)
     {
-        Callable.Func func = new(this);
+        Callable.Func func = new(this,interp.env);
         interp.env.Init(ident.token, func);
     }
 }
