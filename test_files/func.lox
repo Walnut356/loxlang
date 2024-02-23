@@ -1,0 +1,8 @@
+fun printthing(thing1, thing2) {
+    thing1 = thing1 + 4;
+    print "thing1: " + thing1;
+    print "thing2: " + thing2;
+}
+
+printthing(1, 2);
+printthing(3, 4);

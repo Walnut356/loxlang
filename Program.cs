@@ -52,6 +52,7 @@ class Lox
         if (had_error) return;
 
         interpreter.Interpret(stmts);
+        Console.WriteLine($"Execution complete in {FormatTime(interpreter.clock.ElapsedTicks)}");
     }
 
     public static void Error(int line, string msg)

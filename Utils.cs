@@ -58,4 +58,30 @@ static class Utils {
 
         return o.ToString()!;
     }
+
+    /// <summary>
+    ///  Assumes a tick frequency of 10,000,000/s (a resolution of 100ns)
+    /// </summary>
+    /// <param name="ticks"></param>
+    /// <returns></returns>
+    public static string FormatTime(long ticks) {
+        var t = (double)ticks;
+        t = (t / 10_000_000) * 1_000_000_000;
+        if (t > 1000000000)
+        { // s
+            return $"{t / (1000 * 1000 * 1000)}s";
+        }
+        else if (t > 1000000)
+        { // ms
+            return $"{t / (1000 * 1000)}ms";
+        }
+        else if (t > 1000)
+        {
+            return $"{t / (1000)}us";
+        }
+        else
+        {
+            return $"{t}ns";
+        }
+    }
 }

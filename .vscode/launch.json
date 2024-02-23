@@ -10,7 +10,7 @@
             "request": "launch",
             "preLaunchTask": "dotnet: build",
             "program": "${workspaceFolder}/bin/Debug/net8.0/loxlang.exe",
-            "args": ["./test_files/fib.lox"],
+            "args": ["./test_files/fib_func.lox"],
             "cwd": "${workspaceFolder}",
             "stopAtEntry": false,
             "console": "integratedTerminal"

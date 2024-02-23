@@ -12,15 +12,15 @@ public interface Any
     // not that much easier than just writing out the impl for each function. It's small-scale
     // enough that it's really not that bad.
     public string PrettyPrint();
-    public object? Evaluate(Env env);
+    public object? Evaluate(Interpreter interp);
 }
 
 public record Binary(Any left, Token op, Any right) : Any
 {
-    public object? Evaluate(Env env)
+    public object? Evaluate(Interpreter interp)
     {
-        object? l = left.Evaluate(env);
-        object? r = right.Evaluate(env);
+        object? l = left.Evaluate(interp);
+        object? r = right.Evaluate(interp);
 
         switch (op.type)
         {
@@ -31,6 +31,7 @@ public record Binary(Any left, Token op, Any right) : Any
                 {
                     (double, double) => (double)l + (double)r,
                     (string, string) => $"{(string)l}{(string)r}",
+                    (string, double) => $"{(string)l}{(double)r}",
                     _ => throw new Exception($"Cannot add string and nonstring values: {l} and {r}")
                 };
             case FWDSLASH:
@@ -69,9 +70,9 @@ public record Binary(Any left, Token op, Any right) : Any
 
 public record Grouping(Any expression) : Any
 {
-    public object? Evaluate(Env env)
+    public object? Evaluate(Interpreter interp)
     {
-        return expression.Evaluate(env);
+        return expression.Evaluate(interp);
     }
 
     public string PrettyPrint()
@@ -90,7 +91,7 @@ public record Literal(object? value) : Any
         return value.ToString();
     }
 
-    public object Evaluate(Env env)
+    public object? Evaluate(Interpreter _interp)
     {
         return value;
     }
@@ -103,9 +104,9 @@ public record Unary(Token op, Any right) : Any
         return $"({op.token} {right.PrettyPrint()})";
     }
 
-    public object? Evaluate(Env env)
+    public object? Evaluate(Interpreter interp)
     {
-        object? r = right.Evaluate(env);
+        object? r = right.Evaluate(interp);
 
         switch (op.type)
         {
@@ -123,9 +124,9 @@ public record Unary(Token op, Any right) : Any
 
 public record Variable(Token ident) : Any
 {
-    public object? Evaluate(Env env)
+    public object? Evaluate(Interpreter interp)
     {
-        return env.Get(ident);
+        return interp.env.Get(ident);
     }
 
     public string PrettyPrint()
@@ -136,10 +137,10 @@ public record Variable(Token ident) : Any
 
 public record Assign(Token ident, Any val) : Any
 {
-    public object? Evaluate(Env env)
+    public object? Evaluate(Interpreter interp)
     {
-        var result = val.Evaluate(env);
-        env.Assign(ident, result);
+        var result = val.Evaluate(interp);
+        interp.env.Assign(ident, result);
         return result;
     }
 
@@ -151,9 +152,9 @@ public record Assign(Token ident, Any val) : Any
 
 public record Logical(Any left, Token op, Any right) : Any
 {
-    public object? Evaluate(Env env)
+    public object? Evaluate(Interpreter interp)
     {
-        var lhs = left.Evaluate(env);
+        var lhs = left.Evaluate(interp);
         // I dislike this just like i dislike the truthy-ness rule. Logical operators should return
         // logical values - i.e. boolean values. The given logic is like adding 2 ints and getting
         // a string. Even if the answer is right ("2"), it's still not the type of value you'd
@@ -169,13 +170,42 @@ public record Logical(Any left, Token op, Any right) : Any
 
         return op.type switch
         {
-            OR => Truthy(lhs) ? lhs : right.Evaluate(env),
-            AND => Truthy(lhs) ? right.Evaluate(env) : lhs,
+            OR => Truthy(lhs) ? lhs : right.Evaluate(interp),
+            AND => Truthy(lhs) ? right.Evaluate(interp) : lhs,
+            _ => throw new Exception($"Unexpected operator '{op.token}' in logical expression"),
         };
     }
 
     public string PrettyPrint()
     {
         return $"({op.token} {left.PrettyPrint()} {right.PrettyPrint()})";
+    }
+}
+
+public record Call(Any func, Token delim, List<Any> args) : Any
+{
+    public object? Evaluate(Interpreter interp)
+    {
+        Callable.Any resolved;
+        try
+        {
+            resolved = (Callable.Any)func.Evaluate(interp);
+        }
+        catch
+        {
+            throw new RuntimeError(delim, "Resolved object is not callable.");
+        }
+        if (args.Count != resolved?.Arity())
+        {
+            throw new RuntimeError(delim, $"Expected {resolved.Arity()} args, got {args.Count}.");
+        }
+        List<object?> res_args = args.ConvertAll(arg => arg.Evaluate(interp));
+
+        return resolved.Call(interp, res_args);
+    }
+
+    public string PrettyPrint()
+    {
+        return $"{func}({args})";
     }
 }

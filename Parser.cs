@@ -1,14 +1,13 @@
 using static TokenType;
 
-class Parser
-{
-    List<Token> tokens;
-    int i = 0;
+enum FuncType {
+    Function,
+    Method,
+}
 
-    public Parser(List<Token> tokens)
-    {
-        this.tokens = tokens;
-    }
+class Parser(List<Token> tokens)
+{
+    int i = 0;
 
     public List<Stmt.Any> Parse()
     {
@@ -147,7 +146,44 @@ class Parser
             return new Expr.Unary(op, right);
         }
 
-        return Primary();
+        return Call();
+    }
+
+    Expr.Any Call() {
+        Expr.Any expr = Primary();
+
+        while (true) {
+            if (tokens[i].type is PAREN_O) {
+                i++;
+                expr = ArgList(expr);
+            } else {
+                break;
+            }
+        }
+
+        return expr;
+    }
+
+    Expr.Any ArgList(Expr.Any expr) {
+        List<Expr.Any> args = [];
+
+        if(tokens[i].type is not PAREN_C) {
+            args.Add(Expression());
+            while (tokens[i].type is COMMA) {
+                i++;
+                if (args.Count >= 255)
+                {
+                    Lox.Error(tokens[i], "Cannot have more than 255 args");
+                }
+                args.Add(Expression());
+            }
+        }
+
+        Token paren_c = tokens[i];
+        Expect(PAREN_C, "Expected ')' after arg list");
+
+        return new Expr.Call(expr, paren_c, args);
+
     }
 
     Expr.Any Primary()
@@ -225,23 +261,26 @@ class Parser
             FOR => ForStmt(),
             IF => IfStmt(),
             PRINT => PrintStmt(),
+            WHILE => WhileStmt(),
+            RETURN => ReturnStmt(),
             BRACKET_O => new Stmt.Block(Block()),
             _ => ExprStmt(),
         };
     }
 
-    Stmt.Any Declaration()
+    Stmt.Any? Declaration()
     {
         try
         {
             var token = tokens[i];
             return token.type switch
             {
+                FUN => Function(FuncType.Function),
                 VAR => VarDecl(),
                 _ => Statement(),
             };
         }
-        catch (ParseError e)
+        catch
         {
             Sync();
             return null;
@@ -269,9 +308,9 @@ class Parser
         Expect(IDENTIFIER, "Expected a variable name.");
         Token ident = tokens[i - 1];
 
-        Expr.Any init = null;
+        Expr.Any? init = null;
 
-        if (tokens[i].type == EQ)
+        if (tokens[i].type is EQ)
         {
             i++;
             init = Expression();
@@ -281,6 +320,37 @@ class Parser
         return new Stmt.Var(ident, init);
     }
 
+    Stmt.Any Function(FuncType type) {
+        i++;
+        Expect(IDENTIFIER, "Expected a function name.");
+        Token ident = tokens[i - 1];
+
+        Expect(PAREN_O, "Expected '(' to delimit parameter list");
+
+        List<Token> parameters = [];
+
+        if (tokens[i].type is not PAREN_C)
+        {
+            parameters.Add(tokens[i]);
+            i++;
+            while (tokens[i].type is COMMA)
+            {
+                i++;
+                if (parameters.Count >= 255)
+                {
+                    Lox.Error(tokens[i], "Cannot have more than 255 args");
+                }
+                Expect(IDENTIFIER, "Expected parameter name");
+                parameters.Add(tokens[i - 1]);
+            }
+        }
+
+        Expect(PAREN_C, "Expected ')' after parameter list");
+        Expect(BRACKET_O, "Expected '{' before function body");
+        i--;
+        List<Stmt.Any> block = Block();
+        return new Stmt.Function(ident, parameters, block);
+    }
     List<Stmt.Any> Block()
     {
         List<Stmt.Any> stmts = [];
@@ -297,15 +367,32 @@ class Parser
 
     Stmt.Any IfStmt()
     {
+        i++;
         Expect(PAREN_O, "Expected '(' after 'if'.");
         Expr.Any cond = Expression();
         Expect(PAREN_C, "Expected ')' after 'if' condition");
 
         Stmt.Any if_block = Statement();
-        i++;
-        Stmt.Any? else_block = tokens[i - 1].type is ELSE ? Statement() : null;
+        Stmt.Any? else_block = null;
+        if (tokens[i].type is ELSE) {
+            i++;
+            else_block = Statement();
+        }
 
         return new Stmt.If(cond, if_block, else_block);
+    }
+
+    Stmt.Any WhileStmt() {
+        i++;
+        Expect(PAREN_O, "Expected '(' after while");
+
+        Expr.Any cond = Expression();
+
+        Expect(PAREN_C, "Expected ')' after while condition");
+
+        Stmt.Any block = Statement();
+
+        return new Stmt.While(cond, block);
     }
 
     Stmt.Any ForStmt() {
@@ -338,5 +425,15 @@ class Parser
         }
 
         return block;
+    }
+
+    Stmt.Any ReturnStmt() {
+        Token ret = tokens[i];
+        i++;
+        Expr.Any? val = tokens[i].type is SEMICOLON ? null : Expression();
+
+        Expect(SEMICOLON, "Expected ';' after return expression");
+
+        return new Stmt.Return(ret, val);
     }
 }
