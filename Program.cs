@@ -38,7 +38,7 @@ class Lox
             Console.Write("> ");
             var line = Console.ReadLine();
             if (line == "") break;
-            Run(line);
+            Run(line!);
             had_error = false;
         }
     }
@@ -46,8 +46,13 @@ class Lox
     static void Run(string code)
     {
         var tokens = new Scanner(code).ScanTokens();
-        Parser parser = new Parser(tokens);
+        Parser parser = new(tokens);
         List<Stmt.Any> stmts = parser.Parse();
+
+        if (had_error) return;
+
+        Resolver resolver = new(interpreter);
+        resolver.Resolve(stmts);
 
         if (had_error) return;
 

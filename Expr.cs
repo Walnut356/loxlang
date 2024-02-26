@@ -1,3 +1,4 @@
+using System.Net;
 using static TokenType;
 using static Utils;
 
@@ -13,6 +14,7 @@ public interface Any
     // enough that it's really not that bad.
     public string PrettyPrint();
     public object? Evaluate(Interpreter interp);
+    public void Resolve(Resolver res);
 }
 
 public record Binary(Any left, Token op, Any right) : Any
@@ -66,6 +68,12 @@ public record Binary(Any left, Token op, Any right) : Any
     {
         return $"({op.token} {left.PrettyPrint()} {right.PrettyPrint()})";
     }
+
+    public void Resolve(Resolver res)
+    {
+        left.Resolve(res);
+        right.Resolve(res);
+    }
 }
 
 public record Grouping(Any expression) : Any
@@ -80,7 +88,10 @@ public record Grouping(Any expression) : Any
         return $"(group {expression.PrettyPrint()})";
     }
 
-
+    public void Resolve(Resolver res)
+    {
+        expression.Resolve(res);
+    }
 }
 
 public record Literal(object? value) : Any
@@ -94,6 +105,10 @@ public record Literal(object? value) : Any
     public object? Evaluate(Interpreter _interp)
     {
         return value;
+    }
+
+    public void Resolve(Resolver res)
+    {
     }
 }
 
@@ -120,18 +135,33 @@ public record Unary(Token op, Any right) : Any
 
         return null;
     }
+
+    public void Resolve(Resolver res)
+    {
+        right.Resolve(res);
+    }
 }
 
 public record Variable(Token ident) : Any
 {
     public object? Evaluate(Interpreter interp)
     {
-        return interp.env.Get(ident);
+        return interp.locals.TryGetValue(this, out int dist) ?
+            interp.env.GetAt(dist, ident) : interp.globals.Get(ident);
     }
 
     public string PrettyPrint()
     {
-        throw new NotImplementedException();
+        return ident.token;
+    }
+
+    public void Resolve(Resolver res)
+    {
+        if (!(res.scope.Count == 0) && res.scope.Last().ContainsKey(ident.token) && res.scope.Last()[ident.token] == false) {
+            Lox.Error(ident, "Cannot read local variable in its initializer");
+        }
+
+        res.Local(this, ident);
     }
 }
 
@@ -140,13 +170,25 @@ public record Assign(Token ident, Any val) : Any
     public object? Evaluate(Interpreter interp)
     {
         var result = val.Evaluate(interp);
-        interp.env.Assign(ident, result);
+
+        if (interp.locals.TryGetValue(this, out int dist)) {
+            interp.env.AssignAt(dist, ident, result);
+        } else {
+            interp.env.Assign(ident, result);
+        }
+
         return result;
     }
 
     public string PrettyPrint()
     {
         throw new NotImplementedException();
+    }
+
+    public void Resolve(Resolver res)
+    {
+        val.Resolve(res);
+        res.Local(this, ident);
     }
 }
 
@@ -180,6 +222,12 @@ public record Logical(Any left, Token op, Any right) : Any
     {
         return $"({op.token} {left.PrettyPrint()} {right.PrettyPrint()})";
     }
+
+    public void Resolve(Resolver res)
+    {
+        left.Resolve(res);
+        right.Resolve(res);
+    }
 }
 
 public record Call(Any func, Token delim, List<Any> args) : Any
@@ -207,5 +255,14 @@ public record Call(Any func, Token delim, List<Any> args) : Any
     public string PrettyPrint()
     {
         return $"{func}({args})";
+    }
+
+    public void Resolve(Resolver res)
+    {
+        func.Resolve(res);
+
+        foreach(var arg in args) {
+            arg.Resolve(res);
+        }
     }
 }

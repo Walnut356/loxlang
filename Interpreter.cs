@@ -7,6 +7,7 @@ public class Interpreter
     // maybe make this static later? That way it doesn't need to be passed around constantly
     public Env globals = new();
     public Env env;
+    public Dictionary<Expr.Any, int> locals = new();
     public Stopwatch clock = new();
 
     public Interpreter()
@@ -36,6 +37,10 @@ public class Interpreter
         {
             Lox.RuntimeError(e);
         }
+    }
+
+    public void Resolve(Expr.Any expr, int nest) {
+        locals.Add(expr, nest);
     }
 
 }

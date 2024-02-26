@@ -13,14 +13,15 @@ public record Env()
 
     public void Init(string ident, object? val)
     {
-        if (vars.TryGetValue(ident, out var _))
-        {
-            vars[ident] = val;
-        }
-        else
-        {
-            vars.Add(ident, val);
-        }
+        vars[ident] = val;
+        // if (vars.TryGetValue(ident, out var _))
+        // {
+        //     vars[ident] = val;
+        // }
+        // else
+        // {
+        //     vars.Add(ident, val);
+        // }
     }
 
     public object? Get(Token ident)
@@ -43,6 +44,15 @@ public record Env()
         throw new RuntimeError(ident, "Undefined variable '" + ident.token + "'.");
     }
 
+    public object? GetAt(int dist, Token ident) {
+        Env env = this!;
+        for (int i = 0; i < dist; i++) {
+            env = env.parent!;
+        }
+
+        return env.Get(ident);
+    }
+
     public void Assign(Token ident, object? val)
     {
         if (vars.TryGetValue(ident.token, out var _))
@@ -62,6 +72,16 @@ public record Env()
         }
 
         throw new RuntimeError(ident, "Undefined variable '" + ident.token + "'.");
+    }
+
+    public void AssignAt(int dist, Token ident, object? val) {
+        Env env = this;
+        for (int i = 0; i < dist; i++)
+        {
+            env = env.parent!;
+        }
+
+        env.vars[ident.token] = val;
     }
 
     internal void Assign(string token, object? result)

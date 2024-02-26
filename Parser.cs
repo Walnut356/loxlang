@@ -1,6 +1,7 @@
 using static TokenType;
 
-enum FuncType {
+public enum FuncType {
+    None,
     Function,
     Method,
 }
