@@ -1,7 +1,5 @@
 use crate::{
-    chunk::{Chunk, OpCode},
-    stack::Stack,
-    value::Value,
+    chunk::{Chunk, OpCode}, scanner::Scanner, stack::Stack, value::Value
 };
 use log::{Level, debug, log_enabled};
 use std::fmt::Write;
@@ -26,9 +24,17 @@ impl<'a> VM<'a> {
     //     Self { chunk: None }
     // }
 
-    pub fn interpret(&mut self, chunk: &'a Chunk) -> Result<(), InterpretError> {
-        self.chunk = Some(chunk);
+    pub fn interpret(&mut self, source: &str) -> Result<(), InterpretError> {
+        self.compile(source)?;
         self.run()
+    }
+
+    pub fn compile(&mut self, source: &str) -> Result<(), InterpretError> {
+        let mut scanner = Scanner::new(source);
+
+        
+
+        Ok(())
     }
 
     pub fn run(&mut self) -> Result<(), InterpretError> {

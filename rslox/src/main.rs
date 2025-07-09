@@ -1,25 +1,51 @@
 use env_logger::Builder;
 use log::{Level, info};
 use rslox::{chunk::*, value::Value, vm::VM};
+use std::{fs::File, io::{self, BufReader, Read, Write}};
 
 const LOG_LEVEL: Level = Level::Trace;
 
 fn main() {
-    init_log();
+    let mut args = std::env::args();
+    // skip this exe
+    args.next();
 
-    let mut chunk = Chunk::default();
+    if let Some(file_path) = args.next() {
+        run_file(&file_path)
+    } else {
+        repl()
+    }
 
-    chunk.push_opcode(OpCode::Constant, 0);
-    let idx = chunk.push_constant(Value::Float(10.0));
-    chunk.data.push(idx);
-    chunk.push_opcode(OpCode::Negate, 1);
-    chunk.insert_constant(Value::Float(20.0), 2);
-    chunk.push_opcode(OpCode::Add, 3);
-    chunk.push_opcode(OpCode::Return, 4);
+    // info!("{:?}", vm.interpret(&chunk));
+}
+
+fn repl() {
+    let stdin = io::stdin();
+    let mut stdout = io::stdout();
 
     let mut vm = VM::default();
 
-    info!("{:?}", vm.interpret(&chunk));
+    let mut buffer = String::new();
+
+    loop {
+        write!(stdout, "> ").unwrap();
+
+        stdin.read_line(&mut buffer).unwrap();
+
+        info!("{:?}", vm.interpret(&buffer));
+
+        // TODO interpret
+    }
+}
+
+fn run_file(path: &str) {
+    let mut f = File::open(path).unwrap();
+    let mut buffer = String::new();
+    f.read_to_string(&mut buffer).unwrap();
+
+    let mut vm = VM::default();
+
+    info!("{:?}", vm.interpret(&buffer));
 }
 
 fn init_log() {
