@@ -15,6 +15,16 @@ pub enum OpCode {
     Subtract,
     Multiply,
     Divide,
+    Nil,
+    False,
+    True,
+    Not,
+    Eq,
+    Neq,
+    Gt,
+    GtEq,
+    Lt,
+    LtEq,
 }
 
 impl OpCode {

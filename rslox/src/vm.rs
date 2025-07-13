@@ -1,7 +1,11 @@
 use crate::{
-    chunk::{Chunk, OpCode}, compiler::Parser, scanner::{Scanner, Token, TokenKind}, stack::Stack, value::Value
+    chunk::{Chunk, OpCode},
+    compiler::Parser,
+    scanner::{Scanner, Token, TokenKind},
+    stack::Stack,
+    value::Value,
 };
-use log::{debug, log_enabled, trace, Level};
+use log::{Level, debug, log_enabled, trace};
 use std::{fmt::Write, rc::Rc};
 use thiserror::Error;
 
@@ -36,10 +40,11 @@ impl VM {
         let mut parser = Parser::new(source, self.chunk.as_mut().unwrap());
         parser.expression();
         parser.consume(TokenKind::EOF, "Expect EOF");
-        parser.chunk.push_opcode(OpCode::Return, parser.scanner.line);
+        parser
+            .chunk
+            .push_opcode(OpCode::Return, parser.scanner.line);
 
         debug!("{}", parser.chunk.disassemble("chunk"));
-
 
         Ok(())
     }
@@ -59,8 +64,17 @@ impl VM {
                 trace!("cycle {cycles}:\n{disasm_out}");
                 disasm_out.clear();
             }
-            match OpCode::from_repr(op) {
-                Some(OpCode::Constant) => {
+
+            let Some(opcode) = OpCode::from_repr(op) else {
+                return Err(InterpretError::RuntimeError(format!("Invalid Opcode {op}")));
+            };
+
+            match opcode {
+                OpCode::Return => {
+                    println!("return {:?}", self.stack.pop()?);
+                    break;
+                }
+                OpCode::Constant => {
                     let const_idx = *ip
                         .next()
                         .ok_or_else(|| {
@@ -72,7 +86,7 @@ impl VM {
                     self.stack.push(value).unwrap();
                     // println!("{value}");
                 }
-                Some(OpCode::Constant16) => {
+                OpCode::Constant16 => {
                     let const_idx_lo = *ip
                         .next()
                         .ok_or_else(|| {
@@ -87,37 +101,65 @@ impl VM {
                         })?
                         .1 as usize;
 
-                    let const_idx = (const_idx_hi << 8)  | const_idx_lo;
+                    let const_idx = (const_idx_hi << 8) | const_idx_lo;
 
                     let value = self.chunk.as_ref().unwrap().constants[const_idx];
                     self.stack.push(value).unwrap();
                 }
-                Some(OpCode::Negate) => {
+                OpCode::Nil => {
+                    self.stack.push(Value::Nil)?;
+                }
+                OpCode::True => {
+                    self.stack.push(Value::TRUE)?;
+                }
+                OpCode::False => {
+                    self.stack.push(Value::FALSE)?;
+                }
+                OpCode::Negate => {
                     self.stack.top_mut().negate()?;
                 }
+                // all ops that require 2 operands
+                _ => {
+                    let b = self.stack.pop()?;
+                    let top = self.stack.top_mut();
 
-                Some(OpCode::Add) => {
-                    let b = self.stack.pop()?;
-                    self.stack.top_mut().add(&b);
+                    match opcode {
+                        OpCode::Add => {
+                            top.add(&b)?;
+                        }
+                        OpCode::Subtract => {
+                            top.sub(&b)?;
+                        }
+                        OpCode::Multiply => {
+                            top.mul(&b)?;
+                        }
+                        OpCode::Divide => {
+                            top.div(&b)?;
+                        }
+                        OpCode::Not => {
+                            top.not()
+                        }
+                        OpCode::Eq => {
+                            top.equal(&b);
+                        }
+                        OpCode::Neq => {
+                            top.equal(&b);
+                        }
+                        OpCode::Gt => {
+                            top.greater(&b)?;
+                        },
+                        OpCode::GtEq => {
+                            top.greater_equal(&b)?;
+                        },
+                        OpCode::Lt => {
+                            top.less(&b)?;
+                        }
+                        OpCode::LtEq => {
+                            top.less_equal(&b)?;
+                        }
+                        _ => unreachable!(),
+                    }
                 }
-                Some(OpCode::Subtract) => {
-                    let b = self.stack.pop()?;
-                    self.stack.top_mut().sub(&b);
-                }
-                Some(OpCode::Multiply) => {
-                    let b = self.stack.pop()?;
-                    self.stack.top_mut().mul(&b);
-                }
-                Some(OpCode::Divide) => {
-                    let b = self.stack.pop()?;
-                    self.stack.top_mut().div(&b);
-                }
-
-                Some(OpCode::Return) => {
-                    println!("return {:?}", self.stack.pop()?);
-                    break;
-                }
-                None => return Err(InterpretError::RuntimeError(format!("Invalid Opcode {op}"))),
             }
         }
 

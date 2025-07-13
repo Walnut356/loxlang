@@ -58,10 +58,10 @@ impl TokenKind {
     pub const fn precedence(&self) -> Precedence {
         use Precedence as P;
         match self {
-            TokenKind::Minus => P::Term,
-            TokenKind::Plus => P::Term,
-            TokenKind::Slash => P::Factor,
-            TokenKind::Star => P::Factor,
+            Self::Minus | Self::Plus => P::Term,
+            Self::Slash | Self::Star=> P::Factor,
+            Self::NotEq | Self::EqEq => P::Equality,
+            Self::Gt | Self::GtEq | Self::Lt | Self::LtEq => P::Comparison,
             _ => P::None,
         }
     }
@@ -237,6 +237,7 @@ impl Scanner {
             c if c.is_ascii_digit() => {
                 self.consume_while(u8::is_ascii_digit);
                 if !self.at_eof() && self.peek() == b'.' {
+                    self.pos += 1;
                     self.consume_while(u8::is_ascii_digit);
                 }
 
@@ -305,17 +306,17 @@ impl Scanner {
                     }
                     b'f' if token.data.len() > 1 => match token.data.as_bytes()[1] {
                         b'a' => {
-                            if &token.data[1..] == "lse" {
+                            if &token.data[2..] == "lse" {
                                 token.kind = TokenKind::False
                             }
                         }
                         b'o' => {
-                            if &token.data[1..] == "r" {
+                            if &token.data[2..] == "r" {
                                 token.kind = TokenKind::For
                             }
                         }
                         b'u' => {
-                            if &token.data[1..] == "n" {
+                            if &token.data[2..] == "n" {
                                 token.kind = TokenKind::Fun
                             }
                         }
@@ -323,12 +324,12 @@ impl Scanner {
                     },
                     b't' if token.data.len() > 1 => match token.data.as_bytes()[1] {
                         b'h' => {
-                            if &token.data[1..] == "is" {
+                            if &token.data[2..] == "is" {
                                 token.kind = TokenKind::This
                             }
                         }
                         b'r' => {
-                            if &token.data[1..] == "ue" {
+                            if &token.data[2..] == "ue" {
                                 token.kind = TokenKind::True
                             }
                         }

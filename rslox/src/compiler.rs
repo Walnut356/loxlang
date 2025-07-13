@@ -99,15 +99,25 @@ impl<'a> Parser<'a> {
     pub fn prefix_rule(&mut self, token_kind: TokenKind) {
         match token_kind {
             TokenKind::LeftParen => self.grouping(),
-            TokenKind::Minus => self.unary(),
+            TokenKind::Minus | TokenKind::Bang => self.unary(),
             TokenKind::Number => self.number(),
+            TokenKind::False | TokenKind::True | TokenKind::Nil => self.literal(),
             _ => (),
         }
     }
 
     pub fn infix_rule(&mut self, token_kind: TokenKind) {
         match token_kind {
-            TokenKind::Minus | TokenKind::Plus | TokenKind::Slash | TokenKind::Star => self.binary(),
+            TokenKind::Minus
+            | TokenKind::Plus
+            | TokenKind::Slash
+            | TokenKind::Star
+            | TokenKind::NotEq
+            | TokenKind::EqEq
+            | TokenKind::Gt
+            | TokenKind::GtEq
+            | TokenKind::Lt
+            | TokenKind::LtEq => self.binary(),
             _ => (),
         }
     }
@@ -139,10 +149,13 @@ impl<'a> Parser<'a> {
 
         self.parse_precedence(Precedence::Unary);
 
-        match kind {
-            TokenKind::Minus => self.chunk.push_opcode(OpCode::Negate, line),
+        let code = match kind {
+            TokenKind::Minus => OpCode::Negate,
+            TokenKind::Bang => OpCode::Not,
             _ => unreachable!(),
-        }
+        };
+
+        self.chunk.push_opcode(code, line);
     }
 
     pub fn binary(&mut self) {
@@ -156,11 +169,17 @@ impl<'a> Parser<'a> {
             TokenKind::Minus => OpCode::Subtract,
             TokenKind::Star => OpCode::Multiply,
             TokenKind::Slash => OpCode::Divide,
-            _ => unreachable!()
+            TokenKind::NotEq => OpCode::Neq,
+            TokenKind::EqEq => OpCode::Eq,
+            TokenKind::Gt => OpCode::Gt,
+            TokenKind::GtEq => OpCode::GtEq,
+            TokenKind::Lt => OpCode::Lt,
+            TokenKind::LtEq => OpCode::LtEq,
+
+            _ => unreachable!(),
         };
 
         self.chunk.push_opcode(code, line);
-
     }
 
     pub fn number(&mut self) {
@@ -168,5 +187,16 @@ impl<'a> Parser<'a> {
             Ok(x) => self.chunk.insert_constant(Value::Float(x), self.prev.line),
             Err(x) => self.log_error(&self.prev, &format!("{x:?}")),
         }
+    }
+
+    pub fn literal(&mut self) {
+        let code = match self.prev.kind {
+            TokenKind::True => OpCode::True,
+            TokenKind::False => OpCode::False,
+            TokenKind::Nil => OpCode::Nil,
+            _ => unreachable!(),
+        };
+
+        self.chunk.push_opcode(code, self.prev.line);
     }
 }
