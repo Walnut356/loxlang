@@ -1,49 +1,51 @@
-#[derive(Debug, Clone, PartialEq, Eq)]
+use std::rc::Rc;
+
+use crate::compiler::Precedence;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TokenKind {
-    // Single character
     LeftParen,
     RightParen,
     LeftBrace,
     RightBrace,
     Comma,
     Dot,
+    Semicolon,
+
+    // keep the unary and binary operators together for efficiency in the compiler
+    Bang,
     Minus,
     Plus,
-    Semicolon,
     Slash,
     Star,
 
-    Bang,
     Eq,
     Gt,
     Lt,
 
-    // compound token
     NotEq,
     EqEq,
     GtEq,
     LtEq,
+    And,
+    Or,
 
-    // literal
     Ident,
     String,
     Number,
+    False,
+    Nil,
+    This,
+    True,
 
-    // Keyword
-    And,
     Class,
     Else,
-    False,
     For,
     Fun,
     If,
-    Nil,
-    Or,
     Print,
     Return,
     Super,
-    This,
-    True,
     Var,
     While,
 
@@ -52,23 +54,36 @@ pub enum TokenKind {
     EOF,
 }
 
-#[derive(Debug, Clone)]
-pub struct Token<'a> {
-    kind: TokenKind,
-    data: &'a str,
-    line: u32,
+impl TokenKind {
+    pub const fn precedence(&self) -> Precedence {
+        use Precedence as P;
+        match self {
+            TokenKind::Minus => P::Term,
+            TokenKind::Plus => P::Term,
+            TokenKind::Slash => P::Factor,
+            TokenKind::Star => P::Factor,
+            _ => P::None,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
-pub struct Scanner<'a> {
-    source: &'a str,
-    start: usize,
-    pos: usize,
-    line: u32,
+pub struct Token {
+    pub kind: TokenKind,
+    pub data: &'static str,
+    pub line: u32,
 }
 
-impl<'a> Scanner<'a> {
-    pub fn new(source: &'a str) -> Self {
+#[derive(Debug, Clone)]
+pub struct Scanner {
+    pub source: Rc<str>,
+    pub start: usize,
+    pub pos: usize,
+    pub line: u32,
+}
+
+impl Scanner {
+    pub fn new(source: Rc<str>) -> Self {
         Self {
             source,
             start: 0,
@@ -80,7 +95,13 @@ impl<'a> Scanner<'a> {
     fn new_token(&self, kind: TokenKind) -> Token {
         Token {
             kind,
-            data: &self.source[self.start..self.pos],
+            // safety: this should be fine? the Rc lifetime is "bound" to the scanner, which is
+            // bound to the lifetime of the Parser, which is the only consumer of tokens.
+            data: unsafe {
+                (&raw const self.source[self.start..self.pos])
+                    .as_ref()
+                    .unwrap()
+            },
             line: self.line,
         }
     }

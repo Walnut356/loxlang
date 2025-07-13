@@ -1,8 +1,8 @@
 use crate::{
-    chunk::{Chunk, OpCode}, scanner::Scanner, stack::Stack, value::Value
+    chunk::{Chunk, OpCode}, compiler::Parser, scanner::{Scanner, Token, TokenKind}, stack::Stack, value::Value
 };
-use log::{Level, debug, log_enabled};
-use std::fmt::Write;
+use log::{debug, log_enabled, trace, Level};
+use std::{fmt::Write, rc::Rc};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -14,25 +14,32 @@ pub enum InterpretError {
 }
 
 #[derive(Default)]
-pub struct VM<'a> {
-    chunk: Option<&'a Chunk>,
+pub struct VM {
+    chunk: Option<Chunk>,
     stack: Stack<256>,
 }
 
-impl<'a> VM<'a> {
-    // pub fn new() -> Self {
-    //     Self { chunk: None }
-    // }
-
-    pub fn interpret(&mut self, source: &str) -> Result<(), InterpretError> {
+impl VM {
+    pub fn interpret(&mut self, source: Rc<str>) -> Result<(), InterpretError> {
         self.compile(source)?;
+
         self.run()
     }
 
-    pub fn compile(&mut self, source: &str) -> Result<(), InterpretError> {
-        let mut scanner = Scanner::new(source);
+    pub fn compile(&mut self, source: Rc<str>) -> Result<(), InterpretError> {
+        if self.chunk.is_none() {
+            self.chunk = Some(Chunk::default());
+        } else {
+            self.chunk.as_mut().unwrap().reset();
+        }
 
-        
+        let mut parser = Parser::new(source, self.chunk.as_mut().unwrap());
+        parser.expression();
+        parser.consume(TokenKind::EOF, "Expect EOF");
+        parser.chunk.push_opcode(OpCode::Return, parser.scanner.line);
+
+        debug!("{}", parser.chunk.disassemble("chunk"));
+
 
         Ok(())
     }
@@ -49,7 +56,7 @@ impl<'a> VM<'a> {
                     .as_ref()
                     .unwrap()
                     .disassemble_instr(&mut disasm_out, idx);
-                debug!("cycle {cycles}:\n{disasm_out}");
+                trace!("cycle {cycles}:\n{disasm_out}");
                 disasm_out.clear();
             }
             match OpCode::from_repr(op) {
@@ -65,8 +72,28 @@ impl<'a> VM<'a> {
                     self.stack.push(value).unwrap();
                     // println!("{value}");
                 }
+                Some(OpCode::Constant16) => {
+                    let const_idx_lo = *ip
+                        .next()
+                        .ok_or_else(|| {
+                            InterpretError::RuntimeError("Constant data missing".to_owned())
+                        })?
+                        .1 as usize;
+
+                    let const_idx_hi = *ip
+                        .next()
+                        .ok_or_else(|| {
+                            InterpretError::RuntimeError("Constant data missing".to_owned())
+                        })?
+                        .1 as usize;
+
+                    let const_idx = (const_idx_hi << 8)  | const_idx_lo;
+
+                    let value = self.chunk.as_ref().unwrap().constants[const_idx];
+                    self.stack.push(value).unwrap();
+                }
                 Some(OpCode::Negate) => {
-                    self.stack.top_mut().negate();
+                    self.stack.top_mut().negate()?;
                 }
 
                 Some(OpCode::Add) => {
