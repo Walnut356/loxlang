@@ -14,7 +14,7 @@ impl<const N: usize> Default for Stack<N> {
     fn default() -> Self {
         Self {
             cursor: 0,
-            data: [Value::Float(0.0); N],
+            data: [Value::Nil; N],
         }
     }
 }

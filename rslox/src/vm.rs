@@ -118,6 +118,9 @@ impl VM {
                 OpCode::Negate => {
                     self.stack.top_mut().negate()?;
                 }
+                OpCode::Not => {
+                    self.stack.top_mut().not();
+                }
                 // all ops that require 2 operands
                 _ => {
                     let b = self.stack.pop()?;
@@ -135,9 +138,6 @@ impl VM {
                         }
                         OpCode::Divide => {
                             top.div(&b)?;
-                        }
-                        OpCode::Not => {
-                            top.not()
                         }
                         OpCode::Eq => {
                             top.equal(&b);
@@ -161,6 +161,8 @@ impl VM {
                     }
                 }
             }
+
+            trace!("{}", self.trace_stack());
         }
 
         Ok(())
@@ -173,8 +175,15 @@ impl VM {
     pub fn trace_stack(&self) -> String {
         let mut output = "".to_owned();
 
+        let top = self.stack.cursor;
+
+        writeln!(output, "   Stack:").unwrap();
+
         for (i, v) in self.stack.data.iter().enumerate() {
-            writeln!(output, "[{i}]: {v:?}").unwrap();
+            if i >= top {
+                break;
+            }
+            writeln!(output, "   # [{i:03}]: {v}").unwrap();
         }
 
         output
