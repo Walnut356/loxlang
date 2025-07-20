@@ -4,6 +4,14 @@ use strum_macros::*;
 
 use crate::vm::InterpretError;
 
+#[derive(Debug, EnumTryAs, strum_macros::Display, Clone, Copy, PartialEq)]
+pub enum Object {
+    String(&'static str),
+    Object(f64)
+}
+
+// Copy is implemented instead of a bespoke Clone that properly reallocates the string because we
+// don't want to reallocate the string when popping it off the stack
 #[derive(Debug, Default, EnumTryAs, strum_macros::Display, Clone, Copy, PartialEq)]
 pub enum Value {
     #[default]
@@ -12,13 +20,31 @@ pub enum Value {
     Bool(bool),
     #[strum(to_string = "{0}")]
     Float(f64),
+    String(&'static str),
     // #[strum(to_string = "{0}")]
-    // String(String)
+    Object(*mut Object),
 }
 
 impl Value {
     pub const TRUE: Self = Value::Bool(true);
     pub const FALSE: Self = Value::Bool(false);
+
+    pub fn alloc_string(src: &str) -> Self {
+        let val: &mut str = Box::leak(Box::<str>::from(src));
+        Self::String(val)
+    }
+
+    pub fn dealloc(self) {
+        match self {
+            Value::String(s) => unsafe {
+                let _ = Box::from_raw(s as *const str as *mut str);
+            },
+            Value::Object(o) => unsafe {
+                let _ = Box::from_raw(o);
+            },
+            _ => (),
+        }
+    }
 
     /// negates `self` in-place
     pub fn negate(&mut self) -> Result<(), InterpretError> {
@@ -34,21 +60,46 @@ impl Value {
         Ok(())
     }
 
-    /// Subtracts the given value from `self` in-place
-    #[inline(never)]
+    /// Adds the given value to `self` in-place
     pub fn add(&mut self, b: &Value) -> Result<(), InterpretError> {
         match (self, b) {
             (Value::Float(x), Value::Float(y)) => {
                 *x += y;
                 Ok(())
             }
+            (Value::String(s1), Value::String(s2)) => {
+                let mut concat = s1.to_owned();
+                concat.push_str(s2);
+                let new = concat.into_boxed_str();
+
+                // this leaks the old string
+                *s1 = Box::leak(new);
+
+                Ok(())
+            }
             x => Err(InterpretError::RuntimeError(format!(
-                "Add called with non-number operand: {x:?} "
+                "Add called with non-number: {x:?} "
             ))),
         }
     }
 
-    /// Adds the given value to `self` in-place
+    /// Creates a new string, format!("{self}{b}")
+    pub fn concat(&self, b: &Value) -> Result<Value, InterpretError> {
+        match (self, b) {
+            (Value::String(s1), Value::String(s2)) => {
+                let mut concat: String = (*s1).to_owned();
+                concat.push_str(s2);
+
+                Ok(Self::alloc_string(&concat))
+            }
+            x => Err(InterpretError::RuntimeError(format!(
+                "Add called with non-string operands: {x:?} "
+            ))),
+        }
+    }
+
+
+    /// Subtracts the given value from `self` in-place
     pub fn sub(&mut self, b: &Value) -> Result<(), InterpretError> {
         match (self, b) {
             (Value::Float(x), Value::Float(y)) => {

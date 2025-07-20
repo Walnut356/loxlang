@@ -21,6 +21,8 @@ pub enum InterpretError {
 pub struct VM {
     chunk: Option<Chunk>,
     stack: Stack<256>,
+    ///
+    heap_objects: Vec<Value>,
 }
 
 impl VM {

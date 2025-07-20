@@ -102,6 +102,7 @@ impl<'a> Parser<'a> {
             TokenKind::Minus | TokenKind::Bang => self.unary(),
             TokenKind::Number => self.number(),
             TokenKind::False | TokenKind::True | TokenKind::Nil => self.literal(),
+            TokenKind::String => self.string(),
             _ => (),
         }
     }
@@ -198,5 +199,9 @@ impl<'a> Parser<'a> {
         };
 
         self.chunk.push_opcode(code, self.prev.line);
+    }
+
+    pub fn string(&mut self) {
+        self.chunk.insert_constant(Value::alloc_string(&self.prev.data[1..self.prev.data.len() - 1]), self.prev.line);
     }
 }
