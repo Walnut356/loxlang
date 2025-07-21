@@ -5,6 +5,7 @@ use log::error;
 use crate::{
     chunk::{Chunk, OpCode},
     scanner::{Scanner, Token, TokenKind},
+    table::Table,
     value::Value,
     vm::InterpretError,
 };
@@ -34,6 +35,7 @@ impl Precedence {
 #[derive(Debug)]
 pub struct Parser<'a> {
     pub chunk: &'a mut Chunk,
+    string_table: &'a mut Table,
     curr: Token,
     prev: Token,
     pub scanner: Scanner,
@@ -42,10 +44,11 @@ pub struct Parser<'a> {
 }
 
 impl<'a> Parser<'a> {
-    pub fn new(source: Rc<str>, chunk: &'a mut Chunk) -> Self {
+    pub fn new(source: Rc<str>, chunk: &'a mut Chunk, string_table: &'a mut Table) -> Self {
         let mut scanner = Scanner::new(source);
         Self {
             chunk,
+            string_table,
             curr: scanner.next_token(),
             prev: Token {
                 kind: TokenKind::EOF,
@@ -202,6 +205,12 @@ impl<'a> Parser<'a> {
     }
 
     pub fn string(&mut self) {
-        self.chunk.insert_constant(Value::alloc_string(&self.prev.data[1..self.prev.data.len() - 1]), self.prev.line);
+        self.chunk.insert_constant(
+            Value::alloc_string(
+                &self.prev.data[1..self.prev.data.len() - 1],
+                self.string_table,
+            ),
+            self.prev.line,
+        );
     }
 }

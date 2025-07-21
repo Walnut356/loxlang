@@ -3,6 +3,7 @@ use crate::{
     compiler::Parser,
     scanner::{Scanner, Token, TokenKind},
     stack::Stack,
+    table::Table,
     value::Value,
 };
 use log::{Level, debug, log_enabled, trace};
@@ -21,13 +22,23 @@ pub enum InterpretError {
 pub struct VM {
     chunk: Option<Chunk>,
     stack: Stack<256>,
-    ///
     heap_objects: Vec<Value>,
+    strings: Table,
 }
 
 impl VM {
     pub fn interpret(&mut self, source: Rc<str>) -> Result<(), InterpretError> {
         self.compile(source)?;
+
+        for val in &self.chunk.as_ref().unwrap().constants {
+            match val {
+                Value::String(s) => {
+                    self.strings.insert(s, Value::Bool(true));
+                }
+                Value::Object(_) => todo!(),
+                _ => (),
+            }
+        }
 
         self.run()
     }
@@ -39,7 +50,7 @@ impl VM {
             self.chunk.as_mut().unwrap().reset();
         }
 
-        let mut parser = Parser::new(source, self.chunk.as_mut().unwrap());
+        let mut parser = Parser::new(source, self.chunk.as_mut().unwrap(), &mut self.strings);
         parser.expression();
         parser.consume(TokenKind::EOF, "Expect EOF");
         parser
@@ -149,10 +160,10 @@ impl VM {
                         }
                         OpCode::Gt => {
                             top.greater(&b)?;
-                        },
+                        }
                         OpCode::GtEq => {
                             top.greater_equal(&b)?;
-                        },
+                        }
                         OpCode::Lt => {
                             top.less(&b)?;
                         }

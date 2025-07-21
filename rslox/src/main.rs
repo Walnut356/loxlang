@@ -1,11 +1,20 @@
 use env_logger::Builder;
-use log::{info, trace, Level};
-use rslox::{chunk::*, value::Value, vm::{InterpretError, VM}};
-use std::{fs::File, io::{self, BufReader, Read, Write}, rc::Rc};
+use log::{Level, info, trace};
+use rslox::{
+    chunk::*,
+    table::Table,
+    value::Value,
+    vm::{InterpretError, VM},
+};
+use std::{
+    fs::File,
+    io::{self, BufReader, Read, Write},
+    rc::Rc,
+};
 
 const LOG_LEVEL: Level = Level::Trace;
 
-fn main() -> Result<(), InterpretError>{
+fn main() -> Result<(), InterpretError> {
     init_log();
     let mut args = std::env::args();
     // skip this exe
@@ -23,7 +32,6 @@ fn repl() -> Result<(), InterpretError> {
     let mut stdout = io::stdout();
 
     let mut vm = VM::default();
-
 
     loop {
         write!(stdout, "> ").unwrap();
@@ -59,6 +67,9 @@ fn init_log() {
         std::env::set_var("RUST_LOG", LOG_LEVEL.as_str());
     }
     let mut builder = Builder::from_default_env();
-    builder.target(env_logger::Target::Stdout).format_timestamp(None).format_indent(Some(20));
+    builder
+        .target(env_logger::Target::Stdout)
+        .format_timestamp(None)
+        .format_indent(Some(20));
     builder.init();
 }

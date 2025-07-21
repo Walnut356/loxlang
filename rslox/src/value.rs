@@ -2,17 +2,17 @@ use std::ops::Neg;
 
 use strum_macros::*;
 
-use crate::vm::InterpretError;
+use crate::{table::Table, vm::InterpretError};
 
 #[derive(Debug, EnumTryAs, strum_macros::Display, Clone, Copy, PartialEq)]
 pub enum Object {
     String(&'static str),
-    Object(f64)
+    Object(f64),
 }
 
 // Copy is implemented instead of a bespoke Clone that properly reallocates the string because we
 // don't want to reallocate the string when popping it off the stack
-#[derive(Debug, Default, EnumTryAs, strum_macros::Display, Clone, Copy, PartialEq)]
+#[derive(Debug, Default, EnumTryAs, strum_macros::Display, Clone, Copy)]
 pub enum Value {
     #[default]
     Nil,
@@ -20,17 +20,34 @@ pub enum Value {
     Bool(bool),
     #[strum(to_string = "{0}")]
     Float(f64),
+    #[strum(to_string = "{0}")]
     String(&'static str),
     // #[strum(to_string = "{0}")]
     Object(*mut Object),
+}
+
+impl PartialEq for Value {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Bool(l0), Self::Bool(r0)) => l0 == r0,
+            (Self::Float(l0), Self::Float(r0)) => l0 == r0,
+            (Self::String(l0), Self::String(r0)) => l0.as_ptr() == r0.as_ptr(),
+            (Self::Object(l0), Self::Object(r0)) => (*l0).addr() == (*r0).addr(),
+            _ => false,
+        }
+    }
 }
 
 impl Value {
     pub const TRUE: Self = Value::Bool(true);
     pub const FALSE: Self = Value::Bool(false);
 
-    pub fn alloc_string(src: &str) -> Self {
-        let val: &mut str = Box::leak(Box::<str>::from(src));
+    pub fn alloc_string(src: &str, string_table: &mut Table) -> Self {
+        let val = match string_table.get_key(src) {
+            Some(s) => s,
+            None => Box::leak(Box::<str>::from(src)),
+        };
+
         Self::String(val)
     }
 
@@ -82,7 +99,7 @@ impl Value {
             ))),
         }
     }
-
+    /*
     /// Creates a new string, format!("{self}{b}")
     pub fn concat(&self, b: &Value) -> Result<Value, InterpretError> {
         match (self, b) {
@@ -96,8 +113,7 @@ impl Value {
                 "Add called with non-string operands: {x:?} "
             ))),
         }
-    }
-
+    } */
 
     /// Subtracts the given value from `self` in-place
     pub fn sub(&mut self, b: &Value) -> Result<(), InterpretError> {

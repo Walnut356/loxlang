@@ -1,7 +1,7 @@
 pub mod chunk;
-pub mod value;
-pub mod vm;
-pub mod stack;
 pub mod compiler;
 pub mod scanner;
-pub mod map;
+pub mod stack;
+pub mod table;
+pub mod value;
+pub mod vm;

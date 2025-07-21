@@ -59,7 +59,7 @@ impl TokenKind {
         use Precedence as P;
         match self {
             Self::Minus | Self::Plus => P::Term,
-            Self::Slash | Self::Star=> P::Factor,
+            Self::Slash | Self::Star => P::Factor,
             Self::NotEq | Self::EqEq => P::Equality,
             Self::Gt | Self::GtEq | Self::Lt | Self::LtEq => P::Comparison,
             _ => P::None,
@@ -231,6 +231,7 @@ impl Scanner {
                 if self.at_eof() {
                     self.new_error("Unterminated String")
                 } else {
+                    self.pos += 1;
                     self.new_token(TokenKind::String)
                 }
             }
