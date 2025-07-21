@@ -172,9 +172,3 @@ impl Table {
         }
     }
 }
-
-impl Drop for Table {
-    fn drop(&mut self) {
-        todo!()
-    }
-}

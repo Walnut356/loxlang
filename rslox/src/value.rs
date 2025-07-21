@@ -42,8 +42,17 @@ impl Value {
     pub const TRUE: Self = Value::Bool(true);
     pub const FALSE: Self = Value::Bool(false);
 
-    pub fn alloc_string(src: &str, string_table: &mut Table) -> Self {
+    pub fn alloc_str(src: &str, string_table: &mut Table) -> Self {
         let val = match string_table.get_key(src) {
+            Some(s) => s,
+            None => Box::leak(Box::<str>::from(src)),
+        };
+
+        Self::String(val)
+    }
+
+    pub fn alloc_string(src: String, string_table: &mut Table) -> Self {
+        let val = match string_table.get_key(&src) {
             Some(s) => s,
             None => Box::leak(Box::<str>::from(src)),
         };
@@ -78,7 +87,7 @@ impl Value {
     }
 
     /// Adds the given value to `self` in-place
-    pub fn add(&mut self, b: &Value) -> Result<(), InterpretError> {
+    pub fn add(&mut self, b: &Value, string_table: &mut Table) -> Result<(), InterpretError> {
         match (self, b) {
             (Value::Float(x), Value::Float(y)) => {
                 *x += y;
@@ -87,10 +96,10 @@ impl Value {
             (Value::String(s1), Value::String(s2)) => {
                 let mut concat = s1.to_owned();
                 concat.push_str(s2);
-                let new = concat.into_boxed_str();
 
-                // this leaks the old string
-                *s1 = Box::leak(new);
+                // this leaks the old string, but it should be interned and "owned" by the string
+                // table so that's fine
+                *s1 = Value::alloc_string(concat, string_table).try_as_string().unwrap();
 
                 Ok(())
             }

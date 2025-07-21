@@ -1,14 +1,11 @@
 use env_logger::Builder;
 use log::{Level, info, trace};
-use rslox::{
-    chunk::*,
-    table::Table,
-    value::Value,
-    vm::{InterpretError, VM},
-};
+use rslox::
+    vm::{InterpretError, VM}
+;
 use std::{
     fs::File,
-    io::{self, BufReader, Read, Write},
+    io::{self, Read, Write},
     rc::Rc,
 };
 
@@ -46,7 +43,10 @@ fn repl() -> Result<(), InterpretError> {
 
         let source: Rc<str> = Rc::from(buffer);
 
-        vm.interpret(source)?;
+        match vm.interpret(source) {
+            Ok(_) => (),
+            Err(e) => println!("{e}")
+        }
     }
 }
 

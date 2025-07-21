@@ -39,7 +39,7 @@ pub struct Parser<'a> {
     curr: Token,
     prev: Token,
     pub scanner: Scanner,
-    errors: bool,
+    pub errors: bool,
     panic: bool,
 }
 
@@ -59,6 +59,23 @@ impl<'a> Parser<'a> {
             errors: false,
             panic: false,
         }
+    }
+
+    pub fn eof(&self) -> bool {
+        self.curr.kind == TokenKind::EOF
+    }
+
+    pub fn peek_next(&self) -> TokenKind {
+        self.curr.kind
+    }
+
+    pub fn advance_if(&mut self, token: TokenKind) -> bool {
+        if token == self.peek_next() {
+            self.advance();
+            return true;
+        }
+
+        false
     }
 
     pub fn write<const N: usize>(&mut self, bytes: [u8; N]) {
@@ -96,16 +113,19 @@ impl<'a> Parser<'a> {
             self.advance();
         } else {
             self.log_error(&self.curr, error_msg);
+            self.errors = true;
+            self.panic = true;
         }
     }
 
-    pub fn prefix_rule(&mut self, token_kind: TokenKind) {
+    pub fn prefix_rule(&mut self, token_kind: TokenKind, can_assign: bool) {
         match token_kind {
             TokenKind::LeftParen => self.grouping(),
             TokenKind::Minus | TokenKind::Bang => self.unary(),
             TokenKind::Number => self.number(),
             TokenKind::False | TokenKind::True | TokenKind::Nil => self.literal(),
             TokenKind::String => self.string(),
+            TokenKind::Ident => self.variable(can_assign),
             _ => (),
         }
     }
@@ -129,13 +149,116 @@ impl<'a> Parser<'a> {
     pub fn parse_precedence(&mut self, p: Precedence) {
         self.advance();
 
-        self.prefix_rule(self.prev.kind);
+        let can_assign = p <= Precedence::Assignment;
+        self.prefix_rule(self.prev.kind, can_assign);
 
         while p <= self.curr.kind.precedence() {
             self.advance();
 
             self.infix_rule(self.prev.kind);
         }
+
+        if can_assign && self.advance_if(TokenKind::Eq) {
+            self.log_error(&self.prev, "Invalid assignment target");
+            self.errors = true;
+            self.panic = true;
+        }
+    }
+
+    pub fn declaration(&mut self) {
+        if self.advance_if(TokenKind::Var) {
+            self.var_decl();
+        } else {
+            self.statement();
+        }
+        if self.panic {
+            self.resync();
+        }
+    }
+
+    pub fn resync(&mut self) {
+        self.panic = false;
+
+        while self.curr.kind != TokenKind::EOF {
+            if self.prev.kind == TokenKind::Semicolon
+                || matches!(
+                    self.curr.kind,
+                    TokenKind::Class
+                        | TokenKind::Fun
+                        | TokenKind::Var
+                        | TokenKind::For
+                        | TokenKind::If
+                        | TokenKind::While
+                        | TokenKind::Print
+                        | TokenKind::Return
+                )
+            {
+                return;
+            }
+
+            self.advance();
+        }
+    }
+
+    pub fn var_decl(&mut self) {
+        let global = self.parse_var("Expect variable name.");
+
+        if self.advance_if(TokenKind::Eq) {
+            self.expression();
+        } else {
+            self.chunk.push_opcode(OpCode::Nil, self.scanner.line);
+        }
+
+        self.consume(
+            TokenKind::Semicolon,
+            "Expect ';' after variable declaration.",
+        );
+
+        self.var_def(global);
+    }
+
+    pub fn parse_var(&mut self, msg: &str) -> u16 {
+        self.consume(TokenKind::Ident, msg);
+
+        self.chunk
+            .push_constant(Value::alloc_str(self.prev.data, self.string_table))
+    }
+
+    pub fn var_def(&mut self, idx: u16) {
+        let idx = idx.to_ne_bytes();
+        if idx[1] != 0 {
+            self.chunk
+                .push_opcode(OpCode::DefGlobal16, self.scanner.line);
+            self.chunk.data.push(idx[0]);
+            self.chunk.data.push(idx[1]);
+        } else {
+            self.chunk.push_opcode(OpCode::DefGlobal, self.scanner.line);
+            self.chunk.data.push(idx[0]);
+        }
+    }
+
+    pub fn statement(&mut self) {
+        match self.curr.kind {
+            TokenKind::Print => {
+                self.advance();
+                self.print_statement();
+            }
+            _ => {
+                self.expression_statement();
+            }
+        }
+    }
+
+    pub fn print_statement(&mut self) {
+        self.expression();
+        self.consume(TokenKind::Semicolon, "Expect ';' after value.");
+        self.chunk.push_opcode(OpCode::Print, self.scanner.line);
+    }
+
+    pub fn expression_statement(&mut self) {
+        self.expression();
+        self.consume(TokenKind::Semicolon, "Expect ';' after expression.");
+        self.chunk.push_opcode(OpCode::Pop, self.scanner.line);
     }
 
     pub fn expression(&mut self) {
@@ -188,8 +311,14 @@ impl<'a> Parser<'a> {
 
     pub fn number(&mut self) {
         match self.prev.data.parse::<f64>() {
-            Ok(x) => self.chunk.insert_constant(Value::Float(x), self.prev.line),
-            Err(x) => self.log_error(&self.prev, &format!("{x:?}")),
+            Ok(x) => {
+                self.chunk.insert_constant(Value::Float(x), self.prev.line);
+            }
+            Err(x) => {
+                self.log_error(&self.prev, &format!("{x:?}"));
+                self.errors = true;
+                self.panic = true;
+            }
         }
     }
 
@@ -206,11 +335,21 @@ impl<'a> Parser<'a> {
 
     pub fn string(&mut self) {
         self.chunk.insert_constant(
-            Value::alloc_string(
+            Value::alloc_str(
                 &self.prev.data[1..self.prev.data.len() - 1],
                 self.string_table,
             ),
             self.prev.line,
         );
+    }
+
+    pub fn variable(&mut self, can_assign: bool) {
+        let arg = Value::alloc_str(self.prev.data, self.string_table);
+        if can_assign && self.advance_if(TokenKind::Eq) {
+            self.expression();
+            self.chunk.insert_write_global(arg, self.scanner.line);
+        } else {
+            self.chunk.insert_read_global(arg, self.scanner.line);
+        }
     }
 }

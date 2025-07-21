@@ -10,6 +10,12 @@ pub enum OpCode {
     Return,
     Constant,
     Constant16,
+    DefGlobal,
+    DefGlobal16,
+    ReadGlobal,
+    ReadGlobal16,
+    WriteGlobal,
+    WriteGlobal16,
     Negate,
     Add,
     Subtract,
@@ -25,14 +31,16 @@ pub enum OpCode {
     GtEq,
     Lt,
     LtEq,
+    Print,
+    Pop,
 }
 
 impl OpCode {
     /// Returns the byte-size of the opcode + its operand
     pub fn total_size(&self) -> usize {
         match self {
-            OpCode::Constant => 2,
-            OpCode::Constant16 => 3,
+            OpCode::Constant | OpCode::DefGlobal | OpCode::ReadGlobal | OpCode::WriteGlobal => 2,
+            OpCode::Constant16 | OpCode::DefGlobal16 | OpCode::ReadGlobal16 | OpCode::WriteGlobal16 => 3,
             _ => 1,
         }
     }
@@ -92,16 +100,16 @@ impl Chunk {
 
         let opcode = self.data[offset];
         match OpCode::from_repr(opcode) {
-            Some(OpCode::Constant) => {
+            Some(OpCode::Constant) | Some(OpCode::DefGlobal) | Some(OpCode::ReadGlobal) | Some(OpCode::WriteGlobal) => {
                 let idx = self.data[offset + 1] as usize;
-                writeln!(output, "Constant: ({idx:03}) {}", self.constants[idx]).unwrap();
+                writeln!(output, "{}: ({idx:03}) {:?}", OpCode::VARIANTS[opcode as usize], self.constants[idx]).unwrap();
 
                 offset + 2
             }
-            Some(OpCode::Constant16) => {
+            Some(OpCode::Constant16) | Some(OpCode::DefGlobal16) | Some(OpCode::ReadGlobal16) | Some(OpCode::WriteGlobal16) => {
                 let idx = unsafe { self.data.as_ptr().byte_add(offset + 1).cast::<u16>().read() }
                     as usize;
-                writeln!(output, "Constant16: ({idx:05}) {}", self.constants[idx]).unwrap();
+                writeln!(output, "{}: ({idx:05}) {:?}", OpCode::VARIANTS[opcode as usize], self.constants[idx]).unwrap();
 
                 offset + 2
             }
@@ -135,13 +143,46 @@ impl Chunk {
         }
     }
 
-    pub fn insert_constant(&mut self, value: Value, line: u32) {
-        self.push_opcode(OpCode::Constant, line);
+    pub fn insert_constant(&mut self, value: Value, line: u32) -> u16 {
         let idx = self.push_constant(value).to_ne_bytes();
-        self.data.push(idx[0]);
         if idx[1] != 0 {
+            self.push_opcode(OpCode::Constant16, line);
+            self.data.push(idx[0]);
             self.data.push(idx[1]);
+        } else {
+            self.push_opcode(OpCode::Constant, line);
+            self.data.push(idx[0]);
         }
+
+        return u16::from_ne_bytes(idx);
+    }
+
+    pub fn insert_read_global(&mut self, value: Value, line: u32) -> u16 {
+        let idx = self.push_constant(value).to_ne_bytes();
+        if idx[1] != 0 {
+            self.push_opcode(OpCode::ReadGlobal16, line);
+            self.data.push(idx[0]);
+            self.data.push(idx[1]);
+        } else {
+            self.push_opcode(OpCode::ReadGlobal, line);
+            self.data.push(idx[0]);
+        }
+
+        return u16::from_ne_bytes(idx);
+    }
+
+    pub fn insert_write_global(&mut self, value: Value, line: u32) -> u16 {
+        let idx = self.push_constant(value).to_ne_bytes();
+        if idx[1] != 0 {
+            self.push_opcode(OpCode::WriteGlobal16, line);
+            self.data.push(idx[0]);
+            self.data.push(idx[1]);
+        } else {
+            self.push_opcode(OpCode::WriteGlobal, line);
+            self.data.push(idx[0]);
+        }
+
+        return u16::from_ne_bytes(idx);
     }
 }
 

@@ -24,6 +24,7 @@ pub struct VM {
     stack: Stack<256>,
     heap_objects: Vec<Value>,
     strings: Table,
+    globals: Table,
 }
 
 impl VM {
@@ -51,11 +52,19 @@ impl VM {
         }
 
         let mut parser = Parser::new(source, self.chunk.as_mut().unwrap(), &mut self.strings);
-        parser.expression();
+
+        while !parser.eof() {
+            parser.declaration();
+        }
+
+        if parser.errors {
+            return Err(InterpretError::CompileError("".to_owned()));
+        }
+        /*         parser.expression();
         parser.consume(TokenKind::EOF, "Expect EOF");
         parser
             .chunk
-            .push_opcode(OpCode::Return, parser.scanner.line);
+            .push_opcode(OpCode::Return, parser.scanner.line); */
 
         debug!("{}", parser.chunk.disassemble("chunk"));
 
@@ -63,7 +72,8 @@ impl VM {
     }
 
     pub fn run(&mut self) -> Result<(), InterpretError> {
-        let mut ip = self.chunk.as_ref().unwrap().data.iter().enumerate();
+        let mut ip: std::iter::Enumerate<std::slice::Iter<'_, u8>> =
+            self.chunk.as_ref().unwrap().data.iter().enumerate();
         let mut disasm_out = String::new();
         let mut cycles: usize = 0;
 
@@ -84,23 +94,23 @@ impl VM {
 
             match opcode {
                 OpCode::Return => {
-                    println!("return {:?}", self.stack.pop()?);
-                    break;
+                    return Ok(());
                 }
                 OpCode::Constant => {
-                    let const_idx = *ip
+                    /* let const_idx = *ip
                         .next()
                         .ok_or_else(|| {
                             InterpretError::RuntimeError("Constant data missing".to_owned())
                         })?
                         .1 as usize;
 
-                    let value = self.chunk.as_ref().unwrap().constants[const_idx];
+                    let value = self.chunk.as_ref().unwrap().constants[const_idx]; */
+
+                    let value = Self::read_const(self.chunk.as_ref().unwrap(), &mut ip)?;
                     self.stack.push(value).unwrap();
-                    // println!("{value}");
                 }
                 OpCode::Constant16 => {
-                    let const_idx_lo = *ip
+                    /* let const_idx_lo = *ip
                         .next()
                         .ok_or_else(|| {
                             InterpretError::RuntimeError("Constant data missing".to_owned())
@@ -116,8 +126,78 @@ impl VM {
 
                     let const_idx = (const_idx_hi << 8) | const_idx_lo;
 
-                    let value = self.chunk.as_ref().unwrap().constants[const_idx];
+                    let value = self.chunk.as_ref().unwrap().constants[const_idx]; */
+
+                    let value = Self::read_const_16(self.chunk.as_ref().unwrap(), &mut ip)?;
                     self.stack.push(value).unwrap();
+                }
+                OpCode::DefGlobal => {
+                    let name = Self::read_const(self.chunk.as_ref().unwrap(), &mut ip)?;
+                    let n = name.try_as_string().unwrap();
+
+                    self.globals
+                        .insert(n, *self.stack.top());
+
+                    self.stack.pop()?;
+                }
+                OpCode::DefGlobal16 => {
+                    let name = Self::read_const_16(self.chunk.as_ref().unwrap(), &mut ip)?;
+                    let n = name.try_as_string().unwrap();
+
+                    self.globals
+                        .insert(n, *self.stack.top());
+
+                    self.stack.pop()?;
+                }
+                OpCode::ReadGlobal => {
+                    let name = Self::read_const(self.chunk.as_ref().unwrap(), &mut ip)?;
+                    let n = name.try_as_string().unwrap();
+
+                    match self.globals.get(n) {
+                        Some(x) => self.stack.push(*x)?,
+                        None => {
+                            return Err(InterpretError::RuntimeError(format!(
+                                "Undefined variable {n:?}"
+                            )));
+                        }
+                    }
+                }
+                OpCode::ReadGlobal16 => {
+                    let name = Self::read_const_16(self.chunk.as_ref().unwrap(), &mut ip)?;
+                    let n = name.try_as_string().unwrap();
+
+                    match self.globals.get(n) {
+                        Some(x) => self.stack.push(*x)?,
+                        None => {
+                            return Err(InterpretError::RuntimeError(format!(
+                                "Undefined variable {n:?}"
+                            )));
+                        }
+                    }
+                }
+                OpCode::WriteGlobal => {
+                    let name = Self::read_const(self.chunk.as_ref().unwrap(), &mut ip)?;
+
+                    let n = name.try_as_string().unwrap();
+
+                    if self.globals.insert(n, *self.stack.top()) {
+                        self.globals.remove(n);
+                        return Err(InterpretError::RuntimeError(format!(
+                            "Undefined variable {n:?}"
+                        )));
+                    }
+                }
+                OpCode::WriteGlobal16 => {
+                    let name = Self::read_const_16(self.chunk.as_ref().unwrap(), &mut ip)?;
+
+                    let n = name.try_as_string().unwrap();
+
+                    if self.globals.insert(n, *self.stack.top()) {
+                        self.globals.remove(n);
+                        return Err(InterpretError::RuntimeError(format!(
+                            "Undefined variable {n:?}"
+                        )));
+                    }
                 }
                 OpCode::Nil => {
                     self.stack.push(Value::Nil)?;
@@ -134,6 +214,12 @@ impl VM {
                 OpCode::Not => {
                     self.stack.top_mut().not();
                 }
+                OpCode::Print => {
+                    println!("{}", self.stack.pop()?);
+                }
+                OpCode::Pop => {
+                    self.stack.pop()?;
+                }
                 // all ops that require 2 operands
                 _ => {
                     let b = self.stack.pop()?;
@@ -141,7 +227,7 @@ impl VM {
 
                     match opcode {
                         OpCode::Add => {
-                            top.add(&b)?;
+                            top.add(&b, &mut self.strings)?;
                         }
                         OpCode::Subtract => {
                             top.sub(&b)?;
@@ -179,6 +265,37 @@ impl VM {
         }
 
         Ok(())
+    }
+
+    fn read_const(
+        chunk: &Chunk,
+        ip: &mut std::iter::Enumerate<std::slice::Iter<'_, u8>>,
+    ) -> Result<Value, InterpretError> {
+        let const_idx = *ip
+            .next()
+            .ok_or_else(|| InterpretError::RuntimeError("Constant data missing".to_owned()))?
+            .1 as usize;
+
+        Ok(chunk.constants[const_idx])
+    }
+
+    fn read_const_16(
+        chunk: &Chunk,
+        ip: &mut std::iter::Enumerate<std::slice::Iter<'_, u8>>,
+    ) -> Result<Value, InterpretError> {
+        let const_idx_lo = *ip
+            .next()
+            .ok_or_else(|| InterpretError::RuntimeError("Constant data missing".to_owned()))?
+            .1 as usize;
+
+        let const_idx_hi = *ip
+            .next()
+            .ok_or_else(|| InterpretError::RuntimeError("Constant data missing".to_owned()))?
+            .1 as usize;
+
+        let const_idx = (const_idx_hi << 8) | const_idx_lo;
+
+        Ok(chunk.constants[const_idx])
     }
 
     pub fn reset_stack(&mut self) {

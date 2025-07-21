@@ -1,5 +1,3 @@
-use std::ptr::null_mut;
-
 use crate::{value::Value, vm::InterpretError};
 
 /// Not 100% necessary as I could just use a Vec, but this should be a bit faster since we can stack
