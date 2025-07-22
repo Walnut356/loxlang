@@ -36,6 +36,7 @@ impl Precedence {
 pub struct Parser<'a> {
     pub chunk: &'a mut Chunk,
     string_table: &'a mut Table,
+    compiler: Compiler,
     curr: Token,
     prev: Token,
     pub scanner: Scanner,
@@ -49,6 +50,7 @@ impl<'a> Parser<'a> {
         Self {
             chunk,
             string_table,
+            compiler: Compiler::default(),
             curr: scanner.next_token(),
             prev: Token {
                 kind: TokenKind::EOF,
@@ -142,6 +144,8 @@ impl<'a> Parser<'a> {
             | TokenKind::GtEq
             | TokenKind::Lt
             | TokenKind::LtEq => self.binary(),
+            TokenKind::And => self.and(),
+            TokenKind::Or => self.or(),
             _ => (),
         }
     }
@@ -220,11 +224,22 @@ impl<'a> Parser<'a> {
     pub fn parse_var(&mut self, msg: &str) -> u16 {
         self.consume(TokenKind::Ident, msg);
 
-        self.chunk
-            .push_constant(Value::alloc_str(self.prev.data, self.string_table))
+        self.declare_variable();
+
+        if !self.compiler.global_scope() {
+            0
+        } else {
+            self.chunk
+                .push_constant(Value::alloc_str(self.prev.data, self.string_table))
+        }
     }
 
     pub fn var_def(&mut self, idx: u16) {
+        if self.compiler.local_scope() {
+            self.compiler.locals[idx as usize].depth = self.compiler.scope_depth;
+            return;
+        }
+
         let idx = idx.to_ne_bytes();
         if idx[1] != 0 {
             self.chunk
@@ -237,11 +252,70 @@ impl<'a> Parser<'a> {
         }
     }
 
+    pub fn declare_variable(&mut self) {
+        if self.compiler.global_scope() {
+            return;
+        }
+
+        for local in self.compiler.locals[..self.compiler.count as usize]
+            .iter()
+            .rev()
+        {
+            if local.depth != u32::MAX && local.depth < self.compiler.scope_depth {
+                break;
+            }
+
+            if local.name.data == self.prev.data {
+                self.log_error(
+                    &self.prev,
+                    "There is already a variable with this name in this scope.",
+                );
+            }
+        }
+
+        self.add_local();
+    }
+
+    pub fn add_local(&mut self) {
+        if self.compiler.count as usize > self.compiler.locals.len() {
+            self.log_error(&self.prev, "Too many loal variables in function.");
+            self.errors = true;
+            self.panic = true;
+            return;
+        }
+
+        self.compiler.locals[self.compiler.count as usize] = Local {
+            name: self.prev.clone(),
+            depth: self.compiler.scope_depth,
+        };
+        self.compiler.count += 1;
+    }
+
     pub fn statement(&mut self) {
         match self.curr.kind {
             TokenKind::Print => {
                 self.advance();
                 self.print_statement();
+            }
+            TokenKind::LeftBrace => {
+                self.advance();
+                self.compiler.scope_depth += 1;
+                let count = self.compiler.count;
+                self.block();
+                self.compiler.scope_depth -= 1;
+
+                // there should always be exactly as many locals before and after a scope.
+                // That means we don't need to iterate through like the book does, we can just
+                // record that number and reset to it.
+                let stack_pop = self.compiler.count - count;
+                self.chunk.push_opcode(OpCode::StackSub, self.scanner.line);
+                self.chunk.data.push(stack_pop as u8);
+
+                self.compiler.count = count;
+            }
+            TokenKind::If => {
+                self.advance();
+                self.if_statement();
             }
             _ => {
                 self.expression_statement();
@@ -249,10 +323,57 @@ impl<'a> Parser<'a> {
         }
     }
 
+    pub fn block(&mut self) {
+        while matches!(self.peek_next(), TokenKind::RightBrace | TokenKind::EOF) {
+            self.declaration();
+        }
+
+        self.consume(TokenKind::RightBrace, "Expect '}' after block.");
+    }
+
     pub fn print_statement(&mut self) {
         self.expression();
         self.consume(TokenKind::Semicolon, "Expect ';' after value.");
         self.chunk.push_opcode(OpCode::Print, self.scanner.line);
+    }
+
+    pub fn patch_jump(&mut self, idx: usize) {
+        let jump = self.chunk.data.len() - idx - 2;
+
+        if jump > u16::MAX as usize {
+            self.log_error(&self.prev, "Cannot jump more than 16::MAX bytes");
+            self.errors = true;
+            self.panic = true;
+        }
+
+        self.chunk
+            .data
+            .get_mut(idx..=idx + 1)
+            .unwrap()
+            .copy_from_slice(&(jump as u16).to_ne_bytes());
+    }
+
+    pub fn if_statement(&mut self) {
+        self.consume(TokenKind::LeftParen, "Expect '(' after 'if'.");
+        self.expression();
+        self.consume(TokenKind::RightParen, "Expect ')' after condition.");
+
+        let if_jump_idx = self.chunk.push_jump(OpCode::JumpFalsey, self.scanner.line);
+
+        self.chunk.push_opcode(OpCode::Pop, self.scanner.line);
+        self.statement();
+
+        let else_jump_idx = self.chunk.push_jump(OpCode::Jump, self.scanner.line);
+        self.chunk.push_opcode(OpCode::Pop, self.scanner.line);
+
+        self.patch_jump(if_jump_idx);
+
+
+        if self.advance_if(TokenKind::Else) {
+            self.statement();
+        }
+
+        self.patch_jump(else_jump_idx);
     }
 
     pub fn expression_statement(&mut self) {
@@ -309,6 +430,24 @@ impl<'a> Parser<'a> {
         self.chunk.push_opcode(code, line);
     }
 
+    pub fn and(&mut self) {
+        let jump_idx = self.chunk.push_jump(OpCode::JumpFalsey, self.scanner.line);
+
+        self.chunk.push_opcode(OpCode::Pop, self.scanner.line);
+        self.parse_precedence(Precedence::And);
+
+        self.patch_jump(jump_idx);
+    }
+
+    pub fn or(&mut self) {
+        let jump_idx = self.chunk.push_jump(OpCode::JumpTruthy, self.scanner.line);
+
+        self.chunk.push_opcode(OpCode::Pop, self.scanner.line);
+        self.parse_precedence(Precedence::Or);
+
+        self.patch_jump(jump_idx);
+    }
+
     pub fn number(&mut self) {
         match self.prev.data.parse::<f64>() {
             Ok(x) => {
@@ -344,12 +483,105 @@ impl<'a> Parser<'a> {
     }
 
     pub fn variable(&mut self, can_assign: bool) {
-        let arg = Value::alloc_str(self.prev.data, self.string_table);
+        let mut local_idx = self.compiler.resolve_local(self.prev.data);
+
+        let (get_op, set_op) = if let Some(idx) = local_idx {
+            if self.compiler.locals[idx as usize].depth == UNINITIALIZED {
+                self.log_error(
+                    &self.prev,
+                    "Cannot read local variable in its own initializer.",
+                );
+                self.errors = true;
+                self.panic = true;
+            }
+            (OpCode::ReadLocal, OpCode::WriteLocal)
+        } else {
+            local_idx = Some(
+                self.chunk
+                    .push_constant(Value::alloc_str(self.prev.data, self.string_table)),
+            );
+
+            (OpCode::ReadGlobal, OpCode::WriteGlobal)
+        };
+
+        let arg = local_idx.unwrap();
+
         if can_assign && self.advance_if(TokenKind::Eq) {
             self.expression();
-            self.chunk.insert_write_global(arg, self.scanner.line);
+            self.chunk.push_opcode(set_op, self.scanner.line);
         } else {
-            self.chunk.insert_read_global(arg, self.scanner.line);
+            self.chunk.push_opcode(get_op, self.scanner.line);
         }
+
+        if arg > u8::MAX as u16 {
+            self.chunk.data.extend(arg.to_ne_bytes());
+        } else {
+            self.chunk.data.push(arg as u8);
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Local {
+    name: Token,
+    depth: u32,
+}
+
+impl Default for Local {
+    fn default() -> Self {
+        Self {
+            name: Token {
+                kind: TokenKind::Error,
+                data: "",
+                line: 0,
+            },
+            depth: 0,
+        }
+    }
+}
+
+pub const MAX_LOCALS: usize = 256;
+pub const GLOBAL_SCOPE: u32 = 0;
+pub const UNINITIALIZED: u32 = u32::MAX;
+
+#[derive(Debug)]
+pub struct Compiler {
+    locals: [Local; MAX_LOCALS],
+    count: u32,
+    scope_depth: u32,
+}
+
+impl Default for Compiler {
+    fn default() -> Self {
+        Self {
+            locals: std::array::from_fn(|_| Local::default()),
+            count: Default::default(),
+            scope_depth: Default::default(),
+        }
+    }
+}
+
+impl Compiler {
+    pub fn global_scope(&self) -> bool {
+        self.scope_depth == GLOBAL_SCOPE
+    }
+
+    pub fn local_scope(&self) -> bool {
+        self.scope_depth > GLOBAL_SCOPE
+    }
+
+    pub fn add_local(&mut self, token: Token) {
+        self.locals[self.count as usize] = Local {
+            name: token,
+            depth: UNINITIALIZED,
+        };
+    }
+
+    pub fn resolve_local(&self, name: &'static str) -> Option<u16> {
+        self.locals[..self.count as usize]
+            .iter()
+            .rev()
+            .position(|x| x.name.data == name)
+            .map(|x| x as u16)
     }
 }
