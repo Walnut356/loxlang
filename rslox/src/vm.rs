@@ -72,9 +72,6 @@ impl VM {
     }
 
     pub fn run(&mut self) -> Result<(), InterpretError> {
-        let mut ip: std::iter::Enumerate<std::slice::Iter<'_, u8>> =
-            self.chunk.as_ref().unwrap().data.iter().enumerate();
-
         let mut ip = 0;
         let mut disasm_out = String::new();
         let mut cycles: usize = 0;
@@ -91,6 +88,8 @@ impl VM {
                 trace!("cycle {cycles}:\n{disasm_out}");
                 disasm_out.clear();
             }
+
+            ip += 1;
 
             let Some(opcode) = OpCode::from_repr(op) else {
                 return Err(InterpretError::RuntimeError(format!("Invalid Opcode {op}")));
@@ -110,7 +109,11 @@ impl VM {
                 }
                 OpCode::DefGlobal => {
                     let name = Self::read_const(self.chunk.as_ref().unwrap(), &mut ip)?;
-                    let n = name.try_as_string().unwrap();
+                    let Value::String(n) = name else {
+                        return Err(InterpretError::RuntimeError(format!(
+                            "Invalid type for global name. Expected string, got {name:?}"
+                        )));
+                    };
 
                     self.globals.insert(n, *self.stack.top());
 
@@ -222,6 +225,10 @@ impl VM {
                         ip += offset as usize;
                     }
                 }
+                OpCode::JumpBack => {
+                    let offset = Self::read_u16(chunk, &mut ip)?;
+                    ip -= offset as usize;
+                }
                 // all ops that require 2 operands
                 _ => {
                     let b = self.stack.pop()?;
@@ -269,11 +276,11 @@ impl VM {
         Ok(())
     }
 
-    fn read_byte(
-        chunk: &Chunk,
-        ip: &mut usize,
-    ) -> Result<u8, InterpretError> {
-        let val = Ok(chunk.data.get(*ip).copied()
+    fn read_byte(chunk: &Chunk, ip: &mut usize) -> Result<u8, InterpretError> {
+        let val = Ok(chunk
+            .data
+            .get(*ip)
+            .copied()
             .ok_or_else(|| InterpretError::RuntimeError("Constant data missing".to_owned()))?);
 
         *ip += 1;
@@ -281,34 +288,27 @@ impl VM {
         val
     }
 
-    fn read_u16(
-        chunk: &Chunk,
-        ip: &mut usize,
-    ) -> Result<u16, InterpretError> {
+    fn read_u16(chunk: &Chunk, ip: &mut usize) -> Result<u16, InterpretError> {
         if chunk.data.len() <= *ip + 1 {
-            return Err(InterpretError::RuntimeError("Constant data missing".to_owned()));
+            return Err(InterpretError::RuntimeError(
+                "Constant data missing".to_owned(),
+            ));
         }
 
-       let val = unsafe { Ok(chunk.data.as_ptr().byte_add(*ip).cast::<u16>().read()) };
+        let val = unsafe { Ok(chunk.data.as_ptr().byte_add(*ip).cast::<u16>().read()) };
 
-       *ip += 2;
+        *ip += 2;
 
-       val
+        val
     }
 
-    fn read_const(
-        chunk: &Chunk,
-        ip: &mut usize,
-    ) -> Result<Value, InterpretError> {
+    fn read_const(chunk: &Chunk, ip: &mut usize) -> Result<Value, InterpretError> {
         let const_idx = Self::read_byte(chunk, ip)? as usize;
 
         Ok(chunk.constants[const_idx])
     }
 
-    fn read_const_16(
-        chunk: &Chunk,
-        ip: &mut usize,
-    ) -> Result<Value, InterpretError> {
+    fn read_const_16(chunk: &Chunk, ip: &mut usize) -> Result<Value, InterpretError> {
         let const_idx_lo = Self::read_byte(chunk, ip)? as usize;
 
         let const_idx_hi = Self::read_byte(chunk, ip)? as usize;

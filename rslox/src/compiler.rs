@@ -86,11 +86,11 @@ impl<'a> Parser<'a> {
 
     pub fn log_error(&self, token: &Token, message: &str) {
         match token.kind {
-            TokenKind::Error => error!("[Line {}] Error: {message}", self.scanner.line),
-            TokenKind::EOF => error!("[Line {}] Unexpected EOF. {message}", self.scanner.line),
+            TokenKind::Error => error!("[Line {}] Error: {message}", self.prev.line),
+            TokenKind::EOF => error!("[Line {}] Unexpected EOF. {message}", self.prev.line),
             _ => error!(
                 "[Line {}] Unexpected token: \"{}\". {message}",
-                self.scanner.line, token.data
+                self.prev.line, token.data
             ),
         };
     }
@@ -210,7 +210,7 @@ impl<'a> Parser<'a> {
         if self.advance_if(TokenKind::Eq) {
             self.expression();
         } else {
-            self.chunk.push_opcode(OpCode::Nil, self.scanner.line);
+            self.chunk.push_opcode(OpCode::Nil, self.prev.line);
         }
 
         self.consume(
@@ -243,11 +243,11 @@ impl<'a> Parser<'a> {
         let idx = idx.to_ne_bytes();
         if idx[1] != 0 {
             self.chunk
-                .push_opcode(OpCode::DefGlobal16, self.scanner.line);
+                .push_opcode(OpCode::DefGlobal16, self.prev.line);
             self.chunk.data.push(idx[0]);
             self.chunk.data.push(idx[1]);
         } else {
-            self.chunk.push_opcode(OpCode::DefGlobal, self.scanner.line);
+            self.chunk.push_opcode(OpCode::DefGlobal, self.prev.line);
             self.chunk.data.push(idx[0]);
         }
     }
@@ -308,14 +308,20 @@ impl<'a> Parser<'a> {
                 // That means we don't need to iterate through like the book does, we can just
                 // record that number and reset to it.
                 let stack_pop = self.compiler.count - count;
-                self.chunk.push_opcode(OpCode::StackSub, self.scanner.line);
-                self.chunk.data.push(stack_pop as u8);
+                if stack_pop > 0 {
+                    self.chunk.push_opcode(OpCode::StackSub, self.prev.line);
+                    self.chunk.data.push(stack_pop as u8);
+                }
 
                 self.compiler.count = count;
             }
             TokenKind::If => {
                 self.advance();
                 self.if_statement();
+            }
+            TokenKind::While => {
+                self.advance();
+                self.while_statement();
             }
             _ => {
                 self.expression_statement();
@@ -324,7 +330,7 @@ impl<'a> Parser<'a> {
     }
 
     pub fn block(&mut self) {
-        while matches!(self.peek_next(), TokenKind::RightBrace | TokenKind::EOF) {
+        while !matches!(self.peek_next(), TokenKind::RightBrace | TokenKind::EOF) {
             self.declaration();
         }
 
@@ -334,7 +340,7 @@ impl<'a> Parser<'a> {
     pub fn print_statement(&mut self) {
         self.expression();
         self.consume(TokenKind::Semicolon, "Expect ';' after value.");
-        self.chunk.push_opcode(OpCode::Print, self.scanner.line);
+        self.chunk.push_opcode(OpCode::Print, self.prev.line);
     }
 
     pub fn patch_jump(&mut self, idx: usize) {
@@ -358,16 +364,15 @@ impl<'a> Parser<'a> {
         self.expression();
         self.consume(TokenKind::RightParen, "Expect ')' after condition.");
 
-        let if_jump_idx = self.chunk.push_jump(OpCode::JumpFalsey, self.scanner.line);
+        let if_jump_idx = self.chunk.push_jump(OpCode::JumpFalsey, self.prev.line);
 
-        self.chunk.push_opcode(OpCode::Pop, self.scanner.line);
+        self.chunk.push_opcode(OpCode::Pop, self.prev.line);
         self.statement();
 
-        let else_jump_idx = self.chunk.push_jump(OpCode::Jump, self.scanner.line);
-        self.chunk.push_opcode(OpCode::Pop, self.scanner.line);
+        let else_jump_idx = self.chunk.push_jump(OpCode::Jump, self.prev.line);
+        self.chunk.push_opcode(OpCode::Pop, self.prev.line);
 
         self.patch_jump(if_jump_idx);
-
 
         if self.advance_if(TokenKind::Else) {
             self.statement();
@@ -376,11 +381,27 @@ impl<'a> Parser<'a> {
         self.patch_jump(else_jump_idx);
     }
 
+    pub fn while_statement(&mut self) {
+        let loop_start = self.chunk.data.len();
+        self.consume(TokenKind::LeftParen, "Expect '(' after 'while'");
+        self.expression();
+        self.consume(TokenKind::RightParen, "Expect ')' after condition.");
+
+        let exit_jump = self.chunk.push_jump(OpCode::JumpFalsey, self.prev.line);
+        self.chunk.push_opcode(OpCode::Pop, self.prev.line);
+        self.statement();
+        self.chunk.push_loop(loop_start, self.prev.line);
+
+        self.patch_jump(exit_jump);
+        self.chunk.push_opcode(OpCode::Pop, self.prev.line);
+    }
+
     pub fn expression_statement(&mut self) {
         self.expression();
         self.consume(TokenKind::Semicolon, "Expect ';' after expression.");
-        self.chunk.push_opcode(OpCode::Pop, self.scanner.line);
+        self.chunk.push_opcode(OpCode::Pop, self.prev.line);
     }
+
 
     pub fn expression(&mut self) {
         self.parse_precedence(Precedence::Assignment);
@@ -431,18 +452,18 @@ impl<'a> Parser<'a> {
     }
 
     pub fn and(&mut self) {
-        let jump_idx = self.chunk.push_jump(OpCode::JumpFalsey, self.scanner.line);
+        let jump_idx = self.chunk.push_jump(OpCode::JumpFalsey, self.prev.line);
 
-        self.chunk.push_opcode(OpCode::Pop, self.scanner.line);
+        self.chunk.push_opcode(OpCode::Pop, self.prev.line);
         self.parse_precedence(Precedence::And);
 
         self.patch_jump(jump_idx);
     }
 
     pub fn or(&mut self) {
-        let jump_idx = self.chunk.push_jump(OpCode::JumpTruthy, self.scanner.line);
+        let jump_idx = self.chunk.push_jump(OpCode::JumpTruthy, self.prev.line);
 
-        self.chunk.push_opcode(OpCode::Pop, self.scanner.line);
+        self.chunk.push_opcode(OpCode::Pop, self.prev.line);
         self.parse_precedence(Precedence::Or);
 
         self.patch_jump(jump_idx);
@@ -508,9 +529,9 @@ impl<'a> Parser<'a> {
 
         if can_assign && self.advance_if(TokenKind::Eq) {
             self.expression();
-            self.chunk.push_opcode(set_op, self.scanner.line);
+            self.chunk.push_opcode(set_op, self.prev.line);
         } else {
-            self.chunk.push_opcode(get_op, self.scanner.line);
+            self.chunk.push_opcode(get_op, self.prev.line);
         }
 
         if arg > u8::MAX as u16 {

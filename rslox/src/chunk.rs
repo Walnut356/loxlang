@@ -44,6 +44,7 @@ pub enum OpCode {
     Jump,
     JumpFalsey,
     JumpTruthy,
+    JumpBack,
 }
 
 impl OpCode {
@@ -94,7 +95,7 @@ impl Chunk {
             }
         }
 
-        curr
+        self.lines.last().map(|x| x.line).unwrap_or_default()
     }
 
     pub fn disassemble(&self, name: &str) -> String {
@@ -118,6 +119,20 @@ impl Chunk {
 
         let opcode = self.data[offset];
         match OpCode::from_repr(opcode) {
+            Some(OpCode::Jump | OpCode::JumpBack | OpCode::JumpFalsey | OpCode::JumpTruthy) => {
+                                let idx = unsafe { self.data.as_ptr().byte_add(offset + 1).cast::<u16>().read() }
+                    as usize;
+
+                    let jmp = if opcode == OpCode::JumpBack as u8 {
+                        offset + 3 - idx
+                    } else {
+                        offset + 3 + idx
+                    };
+
+                writeln!(output, "{}: {:04x}", OpCode::VARIANTS[opcode as usize], jmp).unwrap();
+
+                offset + 3
+            }
             Some(OpCode::StackSub) | Some(OpCode::ReadLocal) | Some(OpCode::WriteLocal) => {
                 let idx = self.data[offset + 1] as usize;
                 writeln!(output, "{}: {idx:03}", OpCode::VARIANTS[opcode as usize]).unwrap();
@@ -153,7 +168,7 @@ impl Chunk {
                 )
                 .unwrap();
 
-                offset + 2
+                offset + 3
             }
             Some(_) => {
                 writeln!(output, "{}", OpCode::VARIANTS[opcode as usize]).unwrap();
@@ -203,6 +218,20 @@ impl Chunk {
         self.push_opcode(opcode, line);
         self.data.extend(u16::MAX.to_ne_bytes());
         self.data.len() - 2
+    }
+
+    pub fn push_loop(&mut self, idx: usize, line: u32) {
+        self.push_opcode(OpCode::JumpBack, line);
+
+        let offset = self.data.len() - idx + 2;
+        if offset > u16::MAX as usize {
+            // fix this some day
+            panic!();
+        }
+
+        self.data.extend((offset as u16).to_ne_bytes());
+
+
     }
 }
 
