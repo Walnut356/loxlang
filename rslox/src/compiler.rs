@@ -242,8 +242,7 @@ impl<'a> Parser<'a> {
 
         let idx = idx.to_ne_bytes();
         if idx[1] != 0 {
-            self.chunk
-                .push_opcode(OpCode::DefGlobal16, self.prev.line);
+            self.chunk.push_opcode(OpCode::DefGlobal16, self.prev.line);
             self.chunk.data.push(idx[0]);
             self.chunk.data.push(idx[1]);
         } else {
@@ -323,6 +322,10 @@ impl<'a> Parser<'a> {
                 self.advance();
                 self.while_statement();
             }
+            TokenKind::For => {
+                self.advance();
+                self.for_statement();
+            }
             _ => {
                 self.expression_statement();
             }
@@ -396,12 +399,64 @@ impl<'a> Parser<'a> {
         self.chunk.push_opcode(OpCode::Pop, self.prev.line);
     }
 
+    pub fn for_statement(&mut self) {
+        self.compiler.scope_depth += 1;
+        self.consume(TokenKind::LeftParen, "Expect '(' after 'for'");
+
+        match self.peek_next() {
+            TokenKind::Semicolon => self.advance(),
+            TokenKind::Var => {
+                self.advance();
+                self.var_decl();
+            }
+            _ => self.expression_statement(),
+        }
+
+        let mut loop_start = self.chunk.data.len();
+        let mut exit_jump = None;
+
+        match self.peek_next() {
+            TokenKind::Semicolon => self.advance(),
+            _ => {
+                self.expression();
+                self.consume(TokenKind::Semicolon, "Expect ';' after for-loop condition");
+
+                exit_jump = Some(self.chunk.push_jump(OpCode::JumpFalsey, self.prev.line));
+                self.chunk.push_opcode(OpCode::Pop, self.prev.line);
+            }
+        }
+
+        match self.peek_next() {
+            TokenKind::RightParen => self.advance(),
+            _ => {
+                let body_jmp = self.chunk.push_jump(OpCode::Jump, self.prev.line);
+                let incr_start = self.chunk.data.len();
+
+                self.expression();
+                self.chunk.push_opcode(OpCode::Pop, self.prev.line);
+                self.consume(TokenKind::RightParen, "Expect ')' after for-loop clauses");
+
+                self.chunk.push_loop(loop_start, self.prev.line);
+                loop_start = incr_start;
+                self.patch_jump(body_jmp);
+            }
+        }
+
+        self.statement();
+        self.chunk.push_loop(loop_start, self.prev.line);
+
+        if let Some(jmp) = exit_jump {
+            self.patch_jump(jmp);
+            self.chunk.push_opcode(OpCode::Pop, self.prev.line);
+        }
+        self.compiler.scope_depth -= 1;
+    }
+
     pub fn expression_statement(&mut self) {
         self.expression();
         self.consume(TokenKind::Semicolon, "Expect ';' after expression.");
         self.chunk.push_opcode(OpCode::Pop, self.prev.line);
     }
-
 
     pub fn expression(&mut self) {
         self.parse_precedence(Precedence::Assignment);
