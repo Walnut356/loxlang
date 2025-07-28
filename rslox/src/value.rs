@@ -2,12 +2,35 @@ use std::ops::Neg;
 
 use strum_macros::*;
 
-use crate::{table::Table, vm::InterpretError};
+use crate::{chunk::Chunk, table::Table, vm::InterpretError};
 
 #[derive(Debug, EnumTryAs, strum_macros::Display, Clone, Copy, PartialEq)]
 pub enum Object {
     String(&'static str),
     Object(f64),
+}
+
+#[derive(Debug, Default)]
+pub struct Function {
+    pub name: &'static str,
+    pub chunk: Chunk,
+    pub arg_count: u8,
+}
+
+impl std::fmt::Display for Function {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = if self.name.is_empty() {
+            "script"
+        } else {
+            self.name
+        };
+
+        write!(f, "<fn {name}>")
+    }
+}
+
+impl Function {
+
 }
 
 // Copy is implemented instead of a bespoke Clone that properly reallocates the string because we
@@ -23,6 +46,7 @@ pub enum Value {
     #[strum(to_string = "{0}")]
     String(&'static str),
     // #[strum(to_string = "{0}")]
+    Function(*mut Function),
     Object(*mut Object),
 }
 
