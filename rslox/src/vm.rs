@@ -6,7 +6,7 @@ use crate::{
     table::Table,
     value::{Function, Value},
 };
-use log::{Level, debug, log_enabled, trace};
+use log::{debug, error, log_enabled, trace, Level};
 use std::{fmt::Write, rc::Rc};
 use thiserror::Error;
 
@@ -68,11 +68,11 @@ impl VM {
     pub fn interpret(&mut self, source: Rc<str>) -> Result<(), InterpretError> {
         let func = self.compile(source)?;
 
-        self.stack.push(Value::Function(func))?;
 
         self.frames[self.frame_count] = CallFrame::new(func, self.stack.cursor);
         self.frame_count += 1;
 
+        self.stack.push(Value::Function(func))?;
 
         for val in unsafe { &func.as_ref().unwrap().chunk.constants } {
             match val {
@@ -84,7 +84,13 @@ impl VM {
             }
         }
 
-        self.run()
+        let res = self.run();
+
+        if res.is_err() {
+            self.print_stack_trace();
+        }
+
+        res
     }
 
     pub fn compile(&mut self, source: Rc<str>) -> Result<*mut Function, InterpretError> {
@@ -98,31 +104,55 @@ impl VM {
             return Err(InterpretError::CompileError("".to_owned()));
         }
 
-        debug!("{}", parser.compiler.func.chunk.disassemble("chunk"));
+        debug!("{}", parser.compiler.func.chunk.disassemble(parser.compiler.func.name));
 
         Ok(parser.compiler.func as *mut _)
     }
 
+    fn current_frame(&mut self) -> &mut CallFrame {
+        &mut self.frames[self.frame_count - 1]
+    }
+
+    fn frame_ref(&self) -> &CallFrame {
+        &self.frames[self.frame_count - 1]
+    }
+
+    fn chunk(&mut self) -> &Chunk {
+        unsafe { &self.current_frame().func.as_ref().unwrap().chunk }
+    }
+
+    fn ip(&mut self) -> &mut usize {
+        &mut self.current_frame().ip
+    }
+
+    fn ip_copied(&self) -> usize {
+        self.frames[self.frame_count - 1].ip
+    }
+
+    fn sp(&self) -> usize {
+        self.frames[self.frame_count - 1].sp
+    }
+
+
     pub fn run(&mut self) -> Result<(), InterpretError> {
-        let frame = &mut self.frames[self.frame_count - 1];
-        let ip = &mut frame.ip;
-        let chunk = unsafe { &frame.func.as_ref().unwrap().chunk };
+        // let frame = &mut self.frames[self.frame_count - 1];
+        // let ip = &mut frame.ip;
+        // let chunk = unsafe { &frame.func.as_ref().unwrap().chunk };
 
 
         let mut disasm_out = String::new();
         let mut cycles: usize = 0;
 
-
-        while let Some(&op) = chunk.data.get(*ip) {
+        while let ip_copy = self.ip_copied() && let Some(&op) = self.chunk().data.get(ip_copy) {
             cycles += 1;
             if log_enabled!(Level::Debug) {
-                chunk
-                    .disassemble_instr(&mut disasm_out, *ip);
+                self.chunk()
+                    .disassemble_instr(&mut disasm_out, ip_copy);
                 trace!("cycle {cycles}:\n{disasm_out}");
                 disasm_out.clear();
             }
 
-            *ip += 1;
+            *self.ip() += 1;
 
             let Some(opcode) = OpCode::from_repr(op) else {
                 return Err(InterpretError::RuntimeError(format!("Invalid Opcode {op}")));
@@ -130,18 +160,27 @@ impl VM {
 
             match opcode {
                 OpCode::Return => {
-                    return Ok(());
+                    let result = self.stack.pop()?;
+                    self.frame_count -= 1;
+
+                    if self.frame_count == 0 {
+                        self.stack.pop()?;
+                        return Ok(());
+                    }
+
+                    self.stack.cursor = self.sp();
+                    self.stack.push(result)?;
                 }
                 OpCode::Constant => {
-                    let value = Self::read_const(chunk, ip)?;
+                    let value = self.read_const()?;
                     self.stack.push(value).unwrap();
                 }
                 OpCode::Constant16 => {
-                    let value = Self::read_const_16(chunk, ip)?;
+                    let value = self.read_const_16()?;
                     self.stack.push(value).unwrap();
                 }
                 OpCode::DefGlobal => {
-                    let name = Self::read_const(chunk, ip)?;
+                    let name = self.read_const()?;
                     let Value::String(n) = name else {
                         return Err(InterpretError::RuntimeError(format!(
                             "Invalid type for global name. Expected string, got {name:?}"
@@ -153,7 +192,7 @@ impl VM {
                     self.stack.pop()?;
                 }
                 OpCode::DefGlobal16 => {
-                    let name = Self::read_const_16(chunk, ip)?;
+                    let name = self.read_const_16()?;
                     let n = name.try_as_string().unwrap();
 
                     self.globals.insert(n, *self.stack.top());
@@ -161,7 +200,7 @@ impl VM {
                     self.stack.pop()?;
                 }
                 OpCode::ReadGlobal => {
-                    let name = Self::read_const(chunk, ip)?;
+                    let name = self.read_const()?;
                     let n = name.try_as_string().unwrap();
 
                     match self.globals.get(n) {
@@ -174,7 +213,7 @@ impl VM {
                     }
                 }
                 OpCode::ReadGlobal16 => {
-                    let name = Self::read_const_16(chunk, ip)?;
+                    let name = self.read_const_16()?;
                     let n = name.try_as_string().unwrap();
 
                     match self.globals.get(n) {
@@ -187,7 +226,7 @@ impl VM {
                     }
                 }
                 OpCode::WriteGlobal => {
-                    let name = Self::read_const(chunk, ip)?;
+                    let name = self.read_const()?;
 
                     let n = name.try_as_string().unwrap();
 
@@ -199,7 +238,7 @@ impl VM {
                     }
                 }
                 OpCode::WriteGlobal16 => {
-                    let name = Self::read_const_16(chunk, ip)?;
+                    let name = self.read_const_16()?;
 
                     let n = name.try_as_string().unwrap();
 
@@ -211,12 +250,12 @@ impl VM {
                     }
                 }
                 OpCode::ReadLocal => {
-                    let slot = Self::read_byte(chunk, ip)? as usize;
-                    self.stack.push(self.stack.data[frame.sp + slot])?;
+                    let slot = self.read_byte()? as usize;
+                    self.stack.push(self.stack.data[self.sp() + slot])?;
                 }
                 OpCode::WriteLocal => {
-                    let slot = Self::read_byte(chunk, ip)? as usize;
-                    self.stack.data[frame.sp + slot] = *self.stack.top();
+                    let slot = self.read_byte()? as usize;
+                    self.stack.data[self.sp() + slot] = *self.stack.top();
                 }
                 OpCode::Nil => {
                     self.stack.push(Value::Nil)?;
@@ -240,27 +279,49 @@ impl VM {
                     self.stack.pop()?;
                 }
                 OpCode::StackSub => {
-                    self.stack.cursor -= Self::read_byte(chunk, ip)? as usize;
+                    self.stack.cursor -= self.read_byte()? as usize;
                 }
                 OpCode::Jump => {
-                    let offset = Self::read_u16(chunk, ip)?;
-                    *ip += offset as usize;
+                    let offset = self.read_u16()?;
+                    *self.ip() += offset as usize;
                 }
                 OpCode::JumpFalsey => {
-                    let offset = Self::read_u16(chunk, ip)?;
+                    let offset = self.read_u16()?;
                     if self.stack.top().is_falsey() {
-                        *ip += offset as usize;
+                        *self.ip() += offset as usize;
                     }
                 }
                 OpCode::JumpTruthy => {
-                    let offset = Self::read_u16(chunk, ip)?;
+                    let offset = self.read_u16()?;
                     if self.stack.top().is_truthy() {
-                        *ip += offset as usize;
+                        *self.ip() += offset as usize;
                     }
                 }
                 OpCode::JumpBack => {
-                    let offset = Self::read_u16(chunk, ip)?;
-                    *ip -= offset as usize;
+                    let offset = self.read_u16()?;
+                    *self.ip() -= offset as usize;
+                }
+                OpCode::Call => {
+                    let arg_count = self.read_byte()? as usize;
+                    match self.stack.data[self.stack.cursor - 1 - arg_count] {
+                        Value::Function(f) => {
+                            let fun = unsafe {f.as_ref().unwrap()};
+                            if fun.arg_count != arg_count as u8 {
+                                return Err(InterpretError::RuntimeError(format!("{} expects {} args, got {}.", self.stack.data[self.stack.cursor - 1 - arg_count], fun.arg_count, arg_count)))
+                            }
+                            if self.frame_count == MAX_FRAMES {
+                                return Err(InterpretError::RuntimeError("Stack overflow".to_owned()));
+                            }
+
+                            self.frames[self.frame_count] = CallFrame::new(f, (self.stack.cursor - 1) - arg_count);
+                            self.frame_count += 1;
+
+                            debug!("{}", fun.chunk.disassemble(fun.name));
+                            debug!("{}", Self::print_stack(&self.stack, self.sp()));
+                            continue;
+                        }
+                        x => return Err(InterpretError::RuntimeError(format!("Object '{x:?}' is not callable")))
+                    }
                 }
                 // all ops that require 2 operands
                 _ => {
@@ -303,59 +364,61 @@ impl VM {
                 }
             }
 
-            trace!("{}", Self::trace_stack(&self.stack, frame.sp));
+            trace!("{}", Self::print_stack(&self.stack, self.frame_ref().sp));
         }
 
         Ok(())
     }
 
-    fn read_byte(chunk: &Chunk, ip: &mut usize) -> Result<u8, InterpretError> {
-        let val = Ok(chunk
+    fn read_byte(&mut self) -> Result<u8, InterpretError> {
+        let ip = *self.ip();
+        let val = Ok(self.chunk()
             .data
-            .get(*ip)
+            .get(ip)
             .copied()
             .ok_or_else(|| InterpretError::RuntimeError("Constant data missing".to_owned()))?);
 
-        *ip += 1;
+        *self.ip() += 1;
 
         val
     }
 
-    fn read_u16(chunk: &Chunk, ip: &mut usize) -> Result<u16, InterpretError> {
-        if chunk.data.len() <= *ip + 1 {
+    fn read_u16(&mut self) -> Result<u16, InterpretError> {
+        let ip = *self.ip();
+        if self.chunk().data.len() <= ip + 1 {
             return Err(InterpretError::RuntimeError(
                 "Constant data missing".to_owned(),
             ));
         }
 
-        let val = unsafe { Ok(chunk.data.as_ptr().byte_add(*ip).cast::<u16>().read()) };
+        let val = unsafe { Ok(self.chunk().data.as_ptr().byte_add(ip).cast::<u16>().read()) };
 
-        *ip += 2;
+        *self.ip() += 2;
 
         val
     }
 
-    fn read_const(chunk: &Chunk, ip: &mut usize) -> Result<Value, InterpretError> {
-        let const_idx = Self::read_byte(chunk, ip)? as usize;
+    fn read_const(&mut self) -> Result<Value, InterpretError> {
+        let const_idx = self.read_byte()? as usize;
 
-        Ok(chunk.constants[const_idx])
+        Ok(self.chunk().constants[const_idx])
     }
 
-    fn read_const_16(chunk: &Chunk, ip: &mut usize) -> Result<Value, InterpretError> {
-        let const_idx_lo = Self::read_byte(chunk, ip)? as usize;
+    fn read_const_16(&mut self) -> Result<Value, InterpretError> {
+        let const_idx_lo = self.read_byte()? as usize;
 
-        let const_idx_hi = Self::read_byte(chunk, ip)? as usize;
+        let const_idx_hi = self.read_byte()? as usize;
 
         let const_idx = (const_idx_hi << 8) | const_idx_lo;
 
-        Ok(chunk.constants[const_idx])
+        Ok(self.chunk().constants[const_idx])
     }
 
     pub fn reset_stack(&mut self) {
         self.stack.clear();
     }
 
-    pub fn trace_stack(stack: &Stack<MAX_STACK>, sp: usize) -> String {
+    pub fn print_stack(stack: &Stack<MAX_STACK>, sp: usize) -> String {
         let mut output = "".to_owned();
 
         let top = stack.cursor;
@@ -370,5 +433,19 @@ impl VM {
         }
 
         output
+    }
+
+    pub fn print_stack_trace(&self) {
+        for frame in self.frames[0..self.frame_count].iter() {
+            let func = unsafe { frame.func.as_ref().unwrap() };
+            let name = if func.name.is_empty() {
+                    "script"
+            } else {
+                func.name
+            };
+
+
+            error!("[line {}] in {name}", func.chunk.line_for_offset(frame.ip));
+        }
     }
 }

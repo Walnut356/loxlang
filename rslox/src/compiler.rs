@@ -45,8 +45,8 @@ pub struct Parser<'a> {
 
 impl<'a> Parser<'a> {
     pub fn new(source: Rc<str>, string_table: &'a mut Table) -> Self {
-        let mut scanner = Scanner::new(source);
-        Self {
+        let mut scanner = Scanner::new(source.clone());
+        let res = Self {
             string_table,
             compiler: Compiler::default(),
             curr: scanner.next_token(),
@@ -58,7 +58,11 @@ impl<'a> Parser<'a> {
             scanner,
             errors: false,
             panic: false,
-        }
+        };
+
+        res.compiler.func.chunk.source = source;
+
+        res
     }
 
     pub fn eof(&self) -> bool {
@@ -84,11 +88,11 @@ impl<'a> Parser<'a> {
 
     pub fn log_error(&self, token: &Token, message: &str) {
         match token.kind {
-            TokenKind::Error => error!("[Line {}] Error: {message}", self.prev.line),
-            TokenKind::EOF => error!("[Line {}] Unexpected EOF. {message}", self.prev.line),
+            TokenKind::Error => error!("[Line {}] Error: {message}", token.line),
+            TokenKind::EOF => error!("[Line {}] Unexpected EOF. {message}", token.line),
             _ => error!(
                 "[Line {}] Unexpected token: \"{}\". {message}",
-                self.prev.line, token.data
+                token.line, token.data
             ),
         };
     }
@@ -144,6 +148,7 @@ impl<'a> Parser<'a> {
             | TokenKind::LtEq => self.binary(),
             TokenKind::And => self.and(),
             TokenKind::Or => self.or(),
+            TokenKind::LeftParen => self.call(),
             _ => (),
         }
     }
@@ -168,13 +173,18 @@ impl<'a> Parser<'a> {
     }
 
     pub fn declaration(&mut self) {
-        if self.advance_if(TokenKind::Var) {
-            self.var_decl();
-        } else {
-            self.statement();
-        }
-        if self.panic {
-            self.resync();
+        match self.peek_next() {
+            TokenKind::Fun => {
+                self.advance();
+                self.func_decl();
+            }
+            TokenKind::Var => {
+                self.advance();
+                self.var_decl();
+            }
+            _ => {
+                self.statement();
+            }
         }
     }
 
@@ -202,13 +212,80 @@ impl<'a> Parser<'a> {
         }
     }
 
+    pub fn func_decl(&mut self) {
+        let global = self.parse_var("Expect function name.");
+
+        if self.compiler.local_scope() {
+            self.compiler.locals[global as usize].depth = self.compiler.scope_depth;
+            return;
+        }
+
+        self.function(FuncKind::Func);
+        self.var_def(global);
+    }
+
+    pub fn function(&mut self, kind: FuncKind) {
+        let line = self.prev.line;
+
+        let mut inner_compiler = Compiler {
+            kind,
+            scope_depth: 1,
+            ..Default::default()
+        };
+
+        inner_compiler.func.chunk.source = self.scanner.source.clone();
+
+        if kind != FuncKind::Script {
+            inner_compiler.func.name = self.prev.data;
+        }
+
+        std::mem::swap(&mut self.compiler, &mut inner_compiler);
+
+        self.consume(TokenKind::LeftParen, "Expect '(' after function name.");
+
+        if self.peek_next() != TokenKind::RightParen {
+            loop {
+                if self.compiler.func.arg_count == 255 {
+                    self.log_error(&self.prev, "Can't have more than 255 parameters.");
+                }
+
+                self.compiler.func.arg_count += 1;
+
+                let constant = self.parse_var("Expect parameter name");
+                self.var_def(constant);
+
+                if !self.advance_if(TokenKind::Comma) {
+                    break;
+                }
+            }
+        }
+        self.consume(TokenKind::RightParen, "Expect ')' after parameters.");
+        self.consume(TokenKind::LeftBrace, "Expect '{' before function body.");
+
+        self.block();
+
+        std::mem::swap(&mut self.compiler, &mut inner_compiler);
+
+        // self.compiler.func.chunk.push_opcode(OpCode::Constant, line);
+
+        let _ = self
+            .compiler
+            .func
+            .chunk
+            .insert_constant(Value::Function(inner_compiler.func as *mut _), line);
+    }
+
     pub fn var_decl(&mut self) {
+        let line = self.curr.line;
         let global = self.parse_var("Expect variable name.");
 
         if self.advance_if(TokenKind::Eq) {
             self.expression();
         } else {
-            self.compiler.func.chunk.push_opcode(OpCode::Nil, self.prev.line);
+            self.compiler
+                .func
+                .chunk
+                .push_opcode(OpCode::Nil, line);
         }
 
         self.consume(
@@ -227,7 +304,9 @@ impl<'a> Parser<'a> {
         if !self.compiler.global_scope() {
             0
         } else {
-            self.compiler.func.chunk
+            self.compiler
+                .func
+                .chunk
                 .push_constant(Value::alloc_str(self.prev.data, self.string_table))
         }
     }
@@ -240,12 +319,17 @@ impl<'a> Parser<'a> {
 
         let idx = idx.to_ne_bytes();
         if idx[1] != 0 {
-            self.compiler.func.chunk.push_opcode(OpCode::DefGlobal16, self.prev.line);
-            self.compiler.func.chunk.data.push(idx[0]);
-            self.compiler.func.chunk.data.push(idx[1]);
+            self.compiler
+                .func
+                .chunk
+                .push_opcode(OpCode::DefGlobal16, self.prev.line);
+            self.compiler.func.chunk.push_bytes(&idx);
         } else {
-            self.compiler.func.chunk.push_opcode(OpCode::DefGlobal, self.prev.line);
-            self.compiler.func.chunk.data.push(idx[0]);
+            self.compiler
+                .func
+                .chunk
+                .push_opcode(OpCode::DefGlobal, self.prev.line);
+            self.compiler.func.chunk.push_bytes(&[idx[0]]);
         }
     }
 
@@ -306,8 +390,11 @@ impl<'a> Parser<'a> {
                 // record that number and reset to it.
                 let stack_pop = self.compiler.count - count;
                 if stack_pop > 0 {
-                    self.compiler.func.chunk.push_opcode(OpCode::StackSub, self.prev.line);
-                    self.compiler.func.chunk.data.push(stack_pop as u8);
+                    self.compiler
+                        .func
+                        .chunk
+                        .push_opcode(OpCode::StackSub, self.prev.line);
+                    self.compiler.func.chunk.push_bytes(&[stack_pop as u8]);
                 }
 
                 self.compiler.count = count;
@@ -339,9 +426,13 @@ impl<'a> Parser<'a> {
     }
 
     pub fn print_statement(&mut self) {
+        let line = self.prev.line;
         self.expression();
         self.consume(TokenKind::Semicolon, "Expect ';' after value.");
-        self.compiler.func.chunk.push_opcode(OpCode::Print, self.prev.line);
+        self.compiler
+            .func
+            .chunk
+            .push_opcode(OpCode::Print, line);
     }
 
     pub fn patch_jump(&mut self, idx: usize) {
@@ -353,7 +444,9 @@ impl<'a> Parser<'a> {
             self.panic = true;
         }
 
-        self.compiler.func.chunk
+        self.compiler
+            .func
+            .chunk
             .data
             .get_mut(idx..=idx + 1)
             .unwrap()
@@ -365,13 +458,27 @@ impl<'a> Parser<'a> {
         self.expression();
         self.consume(TokenKind::RightParen, "Expect ')' after condition.");
 
-        let if_jump_idx = self.compiler.func.chunk.push_jump(OpCode::JumpFalsey, self.prev.line);
+        let if_jump_idx = self
+            .compiler
+            .func
+            .chunk
+            .push_jump(OpCode::JumpFalsey, self.prev.line);
 
-        self.compiler.func.chunk.push_opcode(OpCode::Pop, self.prev.line);
+        self.compiler
+            .func
+            .chunk
+            .push_opcode(OpCode::Pop, self.prev.line);
         self.statement();
 
-        let else_jump_idx = self.compiler.func.chunk.push_jump(OpCode::Jump, self.prev.line);
-        self.compiler.func.chunk.push_opcode(OpCode::Pop, self.prev.line);
+        let else_jump_idx = self
+            .compiler
+            .func
+            .chunk
+            .push_jump(OpCode::Jump, self.prev.line);
+        self.compiler
+            .func
+            .chunk
+            .push_opcode(OpCode::Pop, self.prev.line);
 
         self.patch_jump(if_jump_idx);
 
@@ -388,13 +495,26 @@ impl<'a> Parser<'a> {
         self.expression();
         self.consume(TokenKind::RightParen, "Expect ')' after condition.");
 
-        let exit_jump = self.compiler.func.chunk.push_jump(OpCode::JumpFalsey, self.prev.line);
-        self.compiler.func.chunk.push_opcode(OpCode::Pop, self.prev.line);
+        let exit_jump = self
+            .compiler
+            .func
+            .chunk
+            .push_jump(OpCode::JumpFalsey, self.prev.line);
+        self.compiler
+            .func
+            .chunk
+            .push_opcode(OpCode::Pop, self.prev.line);
         self.statement();
-        self.compiler.func.chunk.push_loop(loop_start, self.prev.line);
+        self.compiler
+            .func
+            .chunk
+            .push_loop(loop_start, self.prev.line);
 
         self.patch_jump(exit_jump);
-        self.compiler.func.chunk.push_opcode(OpCode::Pop, self.prev.line);
+        self.compiler
+            .func
+            .chunk
+            .push_opcode(OpCode::Pop, self.prev.line);
     }
 
     pub fn for_statement(&mut self) {
@@ -419,33 +539,57 @@ impl<'a> Parser<'a> {
                 self.expression();
                 self.consume(TokenKind::Semicolon, "Expect ';' after for-loop condition");
 
-                exit_jump = Some(self.compiler.func.chunk.push_jump(OpCode::JumpFalsey, self.prev.line));
-                self.compiler.func.chunk.push_opcode(OpCode::Pop, self.prev.line);
+                exit_jump = Some(
+                    self.compiler
+                        .func
+                        .chunk
+                        .push_jump(OpCode::JumpFalsey, self.prev.line),
+                );
+                self.compiler
+                    .func
+                    .chunk
+                    .push_opcode(OpCode::Pop, self.prev.line);
             }
         }
 
         match self.peek_next() {
             TokenKind::RightParen => self.advance(),
             _ => {
-                let body_jmp = self.compiler.func.chunk.push_jump(OpCode::Jump, self.prev.line);
+                let body_jmp = self
+                    .compiler
+                    .func
+                    .chunk
+                    .push_jump(OpCode::Jump, self.prev.line);
                 let incr_start = self.compiler.func.chunk.data.len();
 
                 self.expression();
-                self.compiler.func.chunk.push_opcode(OpCode::Pop, self.prev.line);
+                self.compiler
+                    .func
+                    .chunk
+                    .push_opcode(OpCode::Pop, self.prev.line);
                 self.consume(TokenKind::RightParen, "Expect ')' after for-loop clauses");
 
-                self.compiler.func.chunk.push_loop(loop_start, self.prev.line);
+                self.compiler
+                    .func
+                    .chunk
+                    .push_loop(loop_start, self.prev.line);
                 loop_start = incr_start;
                 self.patch_jump(body_jmp);
             }
         }
 
         self.statement();
-        self.compiler.func.chunk.push_loop(loop_start, self.prev.line);
+        self.compiler
+            .func
+            .chunk
+            .push_loop(loop_start, self.prev.line);
 
         if let Some(jmp) = exit_jump {
             self.patch_jump(jmp);
-            self.compiler.func.chunk.push_opcode(OpCode::Pop, self.prev.line);
+            self.compiler
+                .func
+                .chunk
+                .push_opcode(OpCode::Pop, self.prev.line);
         }
         self.compiler.scope_depth -= 1;
     }
@@ -453,7 +597,10 @@ impl<'a> Parser<'a> {
     pub fn expression_statement(&mut self) {
         self.expression();
         self.consume(TokenKind::Semicolon, "Expect ';' after expression.");
-        self.compiler.func.chunk.push_opcode(OpCode::Pop, self.prev.line);
+        self.compiler
+            .func
+            .chunk
+            .push_opcode(OpCode::Pop, self.prev.line);
     }
 
     pub fn expression(&mut self) {
@@ -505,27 +652,74 @@ impl<'a> Parser<'a> {
     }
 
     pub fn and(&mut self) {
-        let jump_idx = self.compiler.func.chunk.push_jump(OpCode::JumpFalsey, self.prev.line);
+        let jump_idx = self
+            .compiler
+            .func
+            .chunk
+            .push_jump(OpCode::JumpFalsey, self.prev.line);
 
-        self.compiler.func.chunk.push_opcode(OpCode::Pop, self.prev.line);
+        self.compiler
+            .func
+            .chunk
+            .push_opcode(OpCode::Pop, self.prev.line);
         self.parse_precedence(Precedence::And);
 
         self.patch_jump(jump_idx);
     }
 
     pub fn or(&mut self) {
-        let jump_idx = self.compiler.func.chunk.push_jump(OpCode::JumpTruthy, self.prev.line);
+        let jump_idx = self
+            .compiler
+            .func
+            .chunk
+            .push_jump(OpCode::JumpTruthy, self.prev.line);
 
-        self.compiler.func.chunk.push_opcode(OpCode::Pop, self.prev.line);
+        self.compiler
+            .func
+            .chunk
+            .push_opcode(OpCode::Pop, self.prev.line);
         self.parse_precedence(Precedence::Or);
 
         self.patch_jump(jump_idx);
     }
 
+    pub fn call(&mut self) {
+        let line = self.prev.line;
+        let arg_count = self.argument_list();
+        self.compiler
+            .func
+            .chunk
+            .push_opcode(OpCode::Call, line);
+        self.compiler.func.chunk.push_bytes(&[arg_count]);
+    }
+
+    pub fn argument_list(&mut self) -> u8 {
+        let mut count = 0;
+        if self.peek_next() != TokenKind::RightParen {
+            loop {
+                self.expression();
+                if count == 255 {
+                    self.log_error(&self.prev, "Can't hvae more than 255 arguments.");
+                }
+                count += 1;
+                if !self.advance_if(TokenKind::Comma) {
+                    break;
+                }
+            }
+        }
+
+        self.consume(TokenKind::RightParen, "Expect ')' after argument list.");
+
+        count
+    }
+
     pub fn number(&mut self) {
         match self.prev.data.parse::<f64>() {
             Ok(x) => {
-                self.compiler.func.chunk.insert_constant(Value::Float(x), self.prev.line);
+                self.compiler
+                    .func
+                    .chunk
+                    .insert_constant(Value::Float(x), self.prev.line);
             }
             Err(x) => {
                 self.log_error(&self.prev, &format!("{x:?}"));
@@ -571,7 +765,9 @@ impl<'a> Parser<'a> {
             (OpCode::ReadLocal, OpCode::WriteLocal)
         } else {
             local_idx = Some(
-                self.compiler.func.chunk
+                self.compiler
+                    .func
+                    .chunk
                     .push_constant(Value::alloc_str(self.prev.data, self.string_table)),
             );
 
@@ -590,7 +786,7 @@ impl<'a> Parser<'a> {
         if arg > u8::MAX as u16 {
             self.compiler.func.chunk.data.extend(arg.to_ne_bytes());
         } else {
-            self.compiler.func.chunk.data.push(arg as u8);
+            self.compiler.func.chunk.push_bytes(&[arg as u8]);
         }
     }
 }
@@ -618,10 +814,10 @@ pub const MAX_LOCALS: usize = 256;
 pub const GLOBAL_SCOPE: u32 = 0;
 pub const UNINITIALIZED: u32 = u32::MAX;
 
-#[derive(Debug)]
-enum FuncKind {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FuncKind {
     Func,
-    Script
+    Script,
 }
 
 #[derive(Debug)]

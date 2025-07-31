@@ -1,5 +1,6 @@
 use std::ops::Neg;
 
+use strum::VariantNames;
 use strum_macros::*;
 
 use crate::{chunk::Chunk, table::Table, vm::InterpretError};
@@ -29,25 +30,36 @@ impl std::fmt::Display for Function {
     }
 }
 
-impl Function {
-
-}
-
 // Copy is implemented instead of a bespoke Clone that properly reallocates the string because we
 // don't want to reallocate the string when popping it off the stack
-#[derive(Debug, Default, EnumTryAs, strum_macros::Display, Clone, Copy)]
+#[derive(Debug, Default, EnumTryAs, VariantNames, Clone, Copy)]
+#[repr(u8)]
 pub enum Value {
     #[default]
     Nil,
-    #[strum(to_string = "{0}")]
+    // #[strum(to_string = "{0}")]
     Bool(bool),
-    #[strum(to_string = "{0}")]
+    // #[strum(to_string = "{0}")]
     Float(f64),
-    #[strum(to_string = "{0}")]
+    // #[strum(to_string = "{0}")]
     String(&'static str),
     // #[strum(to_string = "{0}")]
     Function(*mut Function),
     Object(*mut Object),
+}
+
+impl std::fmt::Display for Value {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Value::Nil => write!(f, "Nil"),
+            Value::Bool(x) => write!(f, "Bool({})", *x),
+            Value::Float(x) => write!(f, "Float({})", *x),
+            Value::String(x) => write!(f, "String({})", *x),
+            Value::Function(x) => write!(f, "Function({})", unsafe {x.as_ref()}.unwrap().name),
+            Value::Object(x) => write!(f, "Object({:?})", *x),
+        }
+
+    }
 }
 
 impl PartialEq for Value {

@@ -2,7 +2,7 @@ use crate::value::Value;
 use strum::VariantNames;
 use strum_macros::*;
 // use std::io::Write;
-use std::fmt::Write;
+use std::{fmt::Write, rc::Rc};
 
 /// SAFETY: opcodes with 16-bit operands must have a discr 1 greater than their 8-bit counterpart
 /// (e.g. `Constant as u8 == 1`, `Constant16 as u8 == 2`)
@@ -45,6 +45,7 @@ pub enum OpCode {
     JumpFalsey,
     JumpTruthy,
     JumpBack,
+    Call,
 }
 
 impl OpCode {
@@ -59,7 +60,8 @@ impl OpCode {
             OpCode::Constant16
             | OpCode::DefGlobal16
             | OpCode::ReadGlobal16
-            | OpCode::WriteGlobal16 => 3,
+            | OpCode::WriteGlobal16
+            | OpCode::Call => 3,
             _ => 1,
         }
     }
@@ -77,6 +79,7 @@ pub struct Chunk {
     pub data: Vec<u8>,
     pub constants: Vec<Value>,
     pub lines: Vec<LineRun>,
+    pub(crate) source: Rc<str>,
 }
 
 impl Chunk {
@@ -120,24 +123,20 @@ impl Chunk {
         let opcode = self.data[offset];
         match OpCode::from_repr(opcode) {
             Some(OpCode::Jump | OpCode::JumpBack | OpCode::JumpFalsey | OpCode::JumpTruthy) => {
-                                let idx = unsafe { self.data.as_ptr().byte_add(offset + 1).cast::<u16>().read() }
+                let idx = unsafe { self.data.as_ptr().byte_add(offset + 1).cast::<u16>().read() }
                     as usize;
 
-                    let jmp = if opcode == OpCode::JumpBack as u8 {
-                        offset + 3 - idx
-                    } else {
-                        offset + 3 + idx
-                    };
+                let jmp = if opcode == OpCode::JumpBack as u8 {
+                    offset + 3 - idx
+                } else {
+                    offset + 3 + idx
+                };
 
                 writeln!(output, "{}: {:04x}", OpCode::VARIANTS[opcode as usize], jmp).unwrap();
-
-                offset + 3
             }
             Some(OpCode::StackSub) | Some(OpCode::ReadLocal) | Some(OpCode::WriteLocal) => {
                 let idx = self.data[offset + 1] as usize;
                 writeln!(output, "{}: {idx:03}", OpCode::VARIANTS[opcode as usize]).unwrap();
-
-                offset + 2
             }
             Some(OpCode::Constant)
             | Some(OpCode::DefGlobal)
@@ -146,13 +145,11 @@ impl Chunk {
                 let idx = self.data[offset + 1] as usize;
                 writeln!(
                     output,
-                    "{}: ({idx:03}) {:?}",
+                    "{}: ({idx:03}) {}",
                     OpCode::VARIANTS[opcode as usize],
                     self.constants[idx]
                 )
                 .unwrap();
-
-                offset + 2
             }
             Some(OpCode::Constant16)
             | Some(OpCode::DefGlobal16)
@@ -162,23 +159,22 @@ impl Chunk {
                     as usize;
                 writeln!(
                     output,
-                    "{}: ({idx:05}) {:?}",
+                    "{}: ({idx:05}) {}",
                     OpCode::VARIANTS[opcode as usize],
                     self.constants[idx]
                 )
                 .unwrap();
-
-                offset + 3
             }
             Some(_) => {
                 writeln!(output, "{}", OpCode::VARIANTS[opcode as usize]).unwrap();
-                offset + 1
             }
             None => {
                 writeln!(output, "Unknown opcode: {opcode}").unwrap();
-                offset + 1
+                return offset + 1
             }
         }
+
+        OpCode::from_repr(opcode).unwrap().total_size() + offset
     }
 
     pub fn push_opcode(&mut self, code: OpCode, line: u32) {
@@ -191,6 +187,17 @@ impl Chunk {
         }
     }
 
+    /// assumed to occur on the same line as the the previous instruction
+    pub fn push_bytes(&mut self, bytes: &[u8]) {
+        self.data.extend(bytes);
+
+        match self.lines.last_mut() {
+            Some(l) => l.len += bytes.len() as u32,
+            _ => panic!("push byte with no prior opcode")
+        }
+    }
+
+    /// Adds a constant to the constant table. Repeat constants are only stored once
     pub fn push_constant(&mut self, value: Value) -> u16 {
         if let Some(i) = self.constants.iter().position(|x| *x == value) {
             i as u16
@@ -200,15 +207,16 @@ impl Chunk {
         }
     }
 
+    /// Adds a constant to the constant table, then pushes an OpCode::Constant/OpCode::Constant16
+    /// to the bytecode that reads the newly inserted constant
     pub fn insert_constant(&mut self, value: Value, line: u32) -> u16 {
         let idx = self.push_constant(value).to_ne_bytes();
         if idx[1] != 0 {
             self.push_opcode(OpCode::Constant16, line);
-            self.data.push(idx[0]);
-            self.data.push(idx[1]);
+            self.push_bytes(&idx);
         } else {
             self.push_opcode(OpCode::Constant, line);
-            self.data.push(idx[0]);
+            self.push_bytes(&idx[0..1]);
         }
 
         u16::from_ne_bytes(idx)
@@ -216,7 +224,7 @@ impl Chunk {
 
     pub fn push_jump(&mut self, opcode: OpCode, line: u32) -> usize {
         self.push_opcode(opcode, line);
-        self.data.extend(u16::MAX.to_ne_bytes());
+        self.push_bytes(&u16::MAX.to_ne_bytes());
         self.data.len() - 2
     }
 
@@ -229,9 +237,7 @@ impl Chunk {
             panic!();
         }
 
-        self.data.extend((offset as u16).to_ne_bytes());
-
-
+        self.push_bytes(&(offset as u16).to_ne_bytes());
     }
 }
 
