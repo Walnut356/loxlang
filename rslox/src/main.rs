@@ -1,7 +1,6 @@
-use env_logger::Builder;
-use log::{Level, info, trace};
-use rslox::
-    vm::{InterpretError, VM}
+use log::{Level, info};
+use rslox::{init_log,
+    vm::{InterpretError, VM}}
 ;
 use std::{
     fs::File,
@@ -12,7 +11,7 @@ use std::{
 const LOG_LEVEL: Level = Level::Trace;
 
 fn main() -> Result<(), InterpretError> {
-    init_log();
+    init_log(LOG_LEVEL);
     let mut args = std::env::args();
     // skip this exe
     args.next();
@@ -31,6 +30,7 @@ fn repl() -> Result<(), InterpretError> {
     let mut vm = VM::default();
 
     loop {
+        let start = std::time::Instant::now();
         write!(stdout, "> ").unwrap();
         stdout.flush().unwrap();
 
@@ -47,10 +47,15 @@ fn repl() -> Result<(), InterpretError> {
             Ok(_) => (),
             Err(e) => println!("{e}")
         }
+
+        let dur = start.elapsed();
+
+        info!("Execution time: {dur:?}");
     }
 }
 
 fn run_file(path: &str) -> Result<(), InterpretError> {
+    let start = std::time::Instant::now();
     let mut f = File::open(path).unwrap();
     let mut buffer = String::new();
     f.read_to_string(&mut buffer).unwrap();
@@ -59,17 +64,11 @@ fn run_file(path: &str) -> Result<(), InterpretError> {
 
     let source: Rc<str> = Rc::from(buffer);
 
-    vm.interpret(source)
-}
+    let res = vm.interpret(source);
 
-fn init_log() {
-    unsafe {
-        std::env::set_var("RUST_LOG", LOG_LEVEL.as_str());
-    }
-    let mut builder = Builder::from_default_env();
-    builder
-        .target(env_logger::Target::Stdout)
-        .format_timestamp(None)
-        .format_indent(Some(20));
-    builder.init();
+    let dur = start.elapsed();
+
+    info!("Execution time: {dur:?}");
+
+    res
 }

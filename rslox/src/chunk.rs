@@ -56,12 +56,12 @@ impl OpCode {
             | OpCode::DefGlobal
             | OpCode::ReadGlobal
             | OpCode::WriteGlobal
-            | OpCode::StackSub => 2,
+            | OpCode::StackSub
+            | OpCode::Call => 2,
             OpCode::Constant16
             | OpCode::DefGlobal16
             | OpCode::ReadGlobal16
-            | OpCode::WriteGlobal16
-            | OpCode::Call => 3,
+            | OpCode::WriteGlobal16 => 3,
             _ => 1,
         }
     }
@@ -70,8 +70,8 @@ impl OpCode {
 /// Run-length encoded line number
 #[derive(Debug, Default)]
 pub struct LineRun {
-    line: u32,
-    len: u32,
+    pub line: u32,
+    pub len: u32,
 }
 
 #[derive(Debug, Default)]
@@ -93,7 +93,7 @@ impl Chunk {
         let mut curr = 0;
         for l in &self.lines {
             curr += l.len;
-            if curr as usize >= offset {
+            if curr as usize > offset {
                 return l.line;
             }
         }
@@ -157,20 +157,31 @@ impl Chunk {
             | Some(OpCode::WriteGlobal16) => {
                 let idx = unsafe { self.data.as_ptr().byte_add(offset + 1).cast::<u16>().read() }
                     as usize;
-                writeln!(
-                    output,
-                    "{}: ({idx:05}) {}",
-                    OpCode::VARIANTS[opcode as usize],
-                    self.constants[idx]
-                )
-                .unwrap();
+
+                if idx < self.constants.len() {
+                    writeln!(
+                        output,
+                        "{}: ({idx:05}) {}",
+                        OpCode::VARIANTS[opcode as usize],
+                        self.constants[idx]
+                    )
+                    .unwrap();
+                } else {
+                     writeln!(
+                        output,
+                        "<error reading opcode>"
+                     ).unwrap()
+                }
+            }
+            Some(OpCode::Call) => {
+                writeln!(output, "Call ({} args)", self.data[offset + 1]).unwrap();
             }
             Some(_) => {
                 writeln!(output, "{}", OpCode::VARIANTS[opcode as usize]).unwrap();
             }
             None => {
                 writeln!(output, "Unknown opcode: {opcode}").unwrap();
-                return offset + 1
+                return offset + 1;
             }
         }
 
@@ -193,7 +204,7 @@ impl Chunk {
 
         match self.lines.last_mut() {
             Some(l) => l.len += bytes.len() as u32,
-            _ => panic!("push byte with no prior opcode")
+            _ => panic!("push byte with no prior opcode"),
         }
     }
 
@@ -238,6 +249,11 @@ impl Chunk {
         }
 
         self.push_bytes(&(offset as u16).to_ne_bytes());
+    }
+
+    pub fn push_return(&mut self, line: u32) {
+        self.push_opcode(OpCode::Nil, line);
+        self.push_opcode(OpCode::Return, line);
     }
 }
 

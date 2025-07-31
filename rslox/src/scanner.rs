@@ -342,7 +342,7 @@ impl Scanner {
 
                 token
             }
-            _ => todo!(),
+            x => panic!("Invalid character: {x} '{}'", x as char),
         }
     }
 }

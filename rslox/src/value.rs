@@ -1,4 +1,4 @@
-use std::ops::Neg;
+use std::{ops::Neg, time::UNIX_EPOCH};
 
 use strum::VariantNames;
 use strum_macros::*;
@@ -32,10 +32,9 @@ impl std::fmt::Display for Function {
 
 // Copy is implemented instead of a bespoke Clone that properly reallocates the string because we
 // don't want to reallocate the string when popping it off the stack
-#[derive(Debug, Default, EnumTryAs, VariantNames, Clone, Copy)]
+#[derive(Debug, EnumTryAs, VariantNames, Clone, Copy)]
 #[repr(u8)]
 pub enum Value {
-    #[default]
     Nil,
     // #[strum(to_string = "{0}")]
     Bool(bool),
@@ -45,20 +44,27 @@ pub enum Value {
     String(&'static str),
     // #[strum(to_string = "{0}")]
     Function(*mut Function),
+    NativeFn(fn(&[Value]) -> Value),
     Object(*mut Object),
+}
+
+impl Default for Value {
+    fn default() -> Self {
+        Self::Nil
+    }
 }
 
 impl std::fmt::Display for Value {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Value::Nil => write!(f, "Nil"),
-            Value::Bool(x) => write!(f, "Bool({})", *x),
-            Value::Float(x) => write!(f, "Float({})", *x),
-            Value::String(x) => write!(f, "String({})", *x),
-            Value::Function(x) => write!(f, "Function({})", unsafe {x.as_ref()}.unwrap().name),
+            Value::Bool(x) => write!(f, "{}", *x),
+            Value::Float(x) => write!(f, "{}", *x),
+            Value::String(x) => write!(f, "\"{}\"", *x),
+            Value::Function(x) => write!(f, "Function({})", unsafe { x.as_ref() }.unwrap().name),
             Value::Object(x) => write!(f, "Object({:?})", *x),
+            Value::NativeFn(_) => write!(f, "<native function>"),
         }
-
     }
 }
 
@@ -77,6 +83,15 @@ impl PartialEq for Value {
 impl Value {
     pub const TRUE: Self = Value::Bool(true);
     pub const FALSE: Self = Value::Bool(false);
+
+    pub const CLOCK: Self = Value::NativeFn(|_| {
+        Value::Float(
+            std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs_f64(),
+        )
+    });
 
     pub fn alloc_str(src: &str, string_table: &mut Table) -> Self {
         let val = match string_table.get_key(src) {
@@ -135,7 +150,9 @@ impl Value {
 
                 // this leaks the old string, but it should be interned and "owned" by the string
                 // table so that's fine
-                *s1 = Value::alloc_string(concat, string_table).try_as_string().unwrap();
+                *s1 = Value::alloc_string(concat, string_table)
+                    .try_as_string()
+                    .unwrap();
 
                 Ok(())
             }

@@ -6,8 +6,8 @@ use crate::value::Value;
 
 #[derive(Debug, Clone)]
 pub struct Entry {
-    key: &'static str,
-    val: Value,
+    pub(crate) key: &'static str,
+    pub(crate) val: Value,
 }
 
 impl Entry {
@@ -26,7 +26,7 @@ struct T(Option<Entry>);
 #[derive(Debug, Default)]
 pub struct Table {
     count: u32,
-    // Option entry is the same size as entry so there's no need for tombstone values
+    pub(crate) // Option entry is the same size as entry so there's no need for tombstone values
     // dealloc is taken care of through Value::Drop and Vec::Drop
     entries: Vec<Option<Entry>>,
 }

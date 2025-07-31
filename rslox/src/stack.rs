@@ -26,6 +26,10 @@ impl<const N: usize> Stack<N> {
         &self.data[self.cursor - 1]
     }
 
+    pub fn peek(&self, n: usize) -> &Value {
+        &self.data[self.cursor - 1 - n]
+    }
+
     pub fn top_mut(&mut self) -> &mut Value {
         &mut self.data[self.cursor - 1]
     }

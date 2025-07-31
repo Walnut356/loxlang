@@ -82,10 +82,6 @@ impl<'a> Parser<'a> {
         false
     }
 
-    pub fn write<const N: usize>(&mut self, bytes: [u8; N]) {
-        self.compiler.func.chunk.data.extend(bytes);
-    }
-
     pub fn log_error(&self, token: &Token, message: &str) {
         match token.kind {
             TokenKind::Error => error!("[Line {}] Error: {message}", token.line),
@@ -259,10 +255,21 @@ impl<'a> Parser<'a> {
                 }
             }
         }
+
         self.consume(TokenKind::RightParen, "Expect ')' after parameters.");
         self.consume(TokenKind::LeftBrace, "Expect '{' before function body.");
 
         self.block();
+
+        self.compiler
+            .func
+            .chunk
+            .push_opcode(OpCode::Nil, self.prev.line);
+
+        self.compiler
+            .func
+            .chunk
+            .push_opcode(OpCode::Return, self.prev.line);
 
         std::mem::swap(&mut self.compiler, &mut inner_compiler);
 
@@ -282,10 +289,7 @@ impl<'a> Parser<'a> {
         if self.advance_if(TokenKind::Eq) {
             self.expression();
         } else {
-            self.compiler
-                .func
-                .chunk
-                .push_opcode(OpCode::Nil, line);
+            self.compiler.func.chunk.push_opcode(OpCode::Nil, line);
         }
 
         self.consume(
@@ -411,6 +415,10 @@ impl<'a> Parser<'a> {
                 self.advance();
                 self.for_statement();
             }
+            TokenKind::Return => {
+                self.advance();
+                self.return_statement();
+            }
             _ => {
                 self.expression_statement();
             }
@@ -429,10 +437,7 @@ impl<'a> Parser<'a> {
         let line = self.prev.line;
         self.expression();
         self.consume(TokenKind::Semicolon, "Expect ';' after value.");
-        self.compiler
-            .func
-            .chunk
-            .push_opcode(OpCode::Print, line);
+        self.compiler.func.chunk.push_opcode(OpCode::Print, line);
     }
 
     pub fn patch_jump(&mut self, idx: usize) {
@@ -627,6 +632,27 @@ impl<'a> Parser<'a> {
         self.compiler.func.chunk.push_opcode(code, line);
     }
 
+    pub fn return_statement(&mut self) {
+        if self.compiler.kind == FuncKind::Script {
+            self.log_error(&self.prev, "Can't return from top-level code.");
+        }
+
+        if self.advance_if(TokenKind::Return) {
+            self.compiler
+                .func
+                .chunk
+                .push_opcode(OpCode::Nil, self.prev.line);
+        } else {
+            self.expression();
+            self.consume(TokenKind::Semicolon, "Expect ';' after return value.");
+        }
+
+        self.compiler
+            .func
+            .chunk
+            .push_opcode(OpCode::Return, self.prev.line);
+    }
+
     pub fn binary(&mut self) {
         let kind = self.prev.kind;
         let line = self.prev.line;
@@ -686,10 +712,7 @@ impl<'a> Parser<'a> {
     pub fn call(&mut self) {
         let line = self.prev.line;
         let arg_count = self.argument_list();
-        self.compiler
-            .func
-            .chunk
-            .push_opcode(OpCode::Call, line);
+        self.compiler.func.chunk.push_opcode(OpCode::Call, line);
         self.compiler.func.chunk.push_bytes(&[arg_count]);
     }
 
@@ -784,7 +807,7 @@ impl<'a> Parser<'a> {
         }
 
         if arg > u8::MAX as u16 {
-            self.compiler.func.chunk.data.extend(arg.to_ne_bytes());
+            self.compiler.func.chunk.push_bytes(&arg.to_ne_bytes());
         } else {
             self.compiler.func.chunk.push_bytes(&[arg as u8]);
         }

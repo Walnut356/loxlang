@@ -1,3 +1,6 @@
+#[cfg(test)]
+mod test;
+
 use crate::{
     chunk::{Chunk, OpCode},
     compiler::Parser,
@@ -6,8 +9,8 @@ use crate::{
     table::Table,
     value::{Function, Value},
 };
-use log::{debug, error, log_enabled, trace, Level};
-use std::{fmt::Write, rc::Rc};
+use log::{Level, debug, error, log_enabled, trace};
+use std::{cmp::Ordering, fmt::Write, rc::Rc};
 use thiserror::Error;
 
 const MAX_FRAMES: usize = 64;
@@ -21,6 +24,11 @@ pub enum InterpretError {
     RuntimeError(String),
 }
 
+pub enum VMState {
+    Running,
+    Done,
+}
+
 #[derive(Debug, Default)]
 pub struct CallFrame {
     func: *mut Function,
@@ -30,30 +38,26 @@ pub struct CallFrame {
 
 impl CallFrame {
     pub fn new(func: *mut Function, sp: usize) -> Self {
-        Self {
-            func,
-            ip: 0,
-            sp,
-        }
+        Self { func, ip: 0, sp }
     }
 }
 
-
-
 pub struct VM {
     // chunk: Option<Chunk>,
+    clock: usize,
     heap_objects: Vec<Value>,
     strings: Table,
     globals: Table,
     frame_count: usize,
     frames: [CallFrame; MAX_FRAMES],
-    stack: Stack<MAX_STACK>,
+    pub(crate) stack: Stack<MAX_STACK>,
 }
 
 impl Default for VM {
     fn default() -> Self {
         Self {
             // chunk: Default::default(),
+            clock: 0,
             heap_objects: Default::default(),
             strings: Default::default(),
             globals: Default::default(),
@@ -65,9 +69,55 @@ impl Default for VM {
 }
 
 impl VM {
+    /// Shortcut for:
+    /// ```
+    /// self.compile()?;
+    /// self.run()?;
+    /// ```
     pub fn interpret(&mut self, source: Rc<str>) -> Result<(), InterpretError> {
-        let func = self.compile(source)?;
+        self.compile(source)?;
 
+        let res = self.run();
+
+        if res.is_err() {
+            self.print_stack_trace();
+        }
+
+        res
+    }
+
+    pub fn compile(&mut self, source: Rc<str>) -> Result<(), InterpretError> {
+        let mut parser = Parser::new(source, &mut self.strings);
+
+        while !parser.eof() {
+            parser.declaration();
+        }
+
+        if parser.errors {
+            return Err(InterpretError::CompileError("".to_owned()));
+        }
+
+        parser.compiler.func.chunk.push_return(
+            parser
+                .compiler
+                .func
+                .chunk
+                .lines
+                .last()
+                .map(|x| x.line + 1)
+                .unwrap_or_default(),
+        );
+
+        debug!(
+            "{}",
+            parser
+                .compiler
+                .func
+                .chunk
+                .disassemble(parser.compiler.func.name)
+        );
+
+        let func = parser.compiler.func as *mut _;
 
         self.frames[self.frame_count] = CallFrame::new(func, self.stack.cursor);
         self.frame_count += 1;
@@ -84,29 +134,27 @@ impl VM {
             }
         }
 
-        let res = self.run();
+        self.init_natives();
 
-        if res.is_err() {
-            self.print_stack_trace();
+
+
+        if log_enabled!(Level::Trace) {
+            let mut output = "Globals:\n".to_owned();
+
+            for v in self.globals.entries.iter().flatten() {
+                output.push_str(&format!("    {}: {}", v.key, v.val));
+            }
+            trace!("{output}");
         }
 
-        res
+        Ok(())
     }
 
-    pub fn compile(&mut self, source: Rc<str>) -> Result<*mut Function, InterpretError> {
-        let mut parser = Parser::new(source, &mut self.strings);
+    fn init_natives(&mut self) {
 
-        while !parser.eof() {
-            parser.declaration();
-        }
-
-        if parser.errors {
-            return Err(InterpretError::CompileError("".to_owned()));
-        }
-
-        debug!("{}", parser.compiler.func.chunk.disassemble(parser.compiler.func.name));
-
-        Ok(parser.compiler.func as *mut _)
+        let clock = Value::alloc_str("clock", &mut self.strings);
+        self.globals
+            .insert(clock.try_as_string().unwrap(), Value::CLOCK);
     }
 
     fn current_frame(&mut self) -> &mut CallFrame {
@@ -133,246 +181,286 @@ impl VM {
         self.frames[self.frame_count - 1].sp
     }
 
+    fn slot(&mut self, n: usize) -> &mut Value {
+        &mut self.stack.data[self.sp() + 1 + n]
+    }
 
     pub fn run(&mut self) -> Result<(), InterpretError> {
-        // let frame = &mut self.frames[self.frame_count - 1];
-        // let ip = &mut frame.ip;
-        // let chunk = unsafe { &frame.func.as_ref().unwrap().chunk };
-
-
-        let mut disasm_out = String::new();
-        let mut cycles: usize = 0;
-
-        while let ip_copy = self.ip_copied() && let Some(&op) = self.chunk().data.get(ip_copy) {
-            cycles += 1;
-            if log_enabled!(Level::Debug) {
-                self.chunk()
-                    .disassemble_instr(&mut disasm_out, ip_copy);
-                trace!("cycle {cycles}:\n{disasm_out}");
-                disasm_out.clear();
+        loop {
+            match self.step() {
+                Ok(VMState::Running) => continue,
+                Ok(VMState::Done) => return Ok(()),
+                Err(e) => return Err(e),
             }
+        }
+    }
 
-            *self.ip() += 1;
-
-            let Some(opcode) = OpCode::from_repr(op) else {
-                return Err(InterpretError::RuntimeError(format!("Invalid Opcode {op}")));
-            };
-
-            match opcode {
-                OpCode::Return => {
-                    let result = self.stack.pop()?;
-                    self.frame_count -= 1;
-
-                    if self.frame_count == 0 {
-                        self.stack.pop()?;
-                        return Ok(());
-                    }
-
-                    self.stack.cursor = self.sp();
-                    self.stack.push(result)?;
-                }
-                OpCode::Constant => {
-                    let value = self.read_const()?;
-                    self.stack.push(value).unwrap();
-                }
-                OpCode::Constant16 => {
-                    let value = self.read_const_16()?;
-                    self.stack.push(value).unwrap();
-                }
-                OpCode::DefGlobal => {
-                    let name = self.read_const()?;
-                    let Value::String(n) = name else {
-                        return Err(InterpretError::RuntimeError(format!(
-                            "Invalid type for global name. Expected string, got {name:?}"
-                        )));
-                    };
-
-                    self.globals.insert(n, *self.stack.top());
-
-                    self.stack.pop()?;
-                }
-                OpCode::DefGlobal16 => {
-                    let name = self.read_const_16()?;
-                    let n = name.try_as_string().unwrap();
-
-                    self.globals.insert(n, *self.stack.top());
-
-                    self.stack.pop()?;
-                }
-                OpCode::ReadGlobal => {
-                    let name = self.read_const()?;
-                    let n = name.try_as_string().unwrap();
-
-                    match self.globals.get(n) {
-                        Some(x) => self.stack.push(*x)?,
-                        None => {
-                            return Err(InterpretError::RuntimeError(format!(
-                                "Undefined variable {n:?}"
-                            )));
-                        }
-                    }
-                }
-                OpCode::ReadGlobal16 => {
-                    let name = self.read_const_16()?;
-                    let n = name.try_as_string().unwrap();
-
-                    match self.globals.get(n) {
-                        Some(x) => self.stack.push(*x)?,
-                        None => {
-                            return Err(InterpretError::RuntimeError(format!(
-                                "Undefined variable {n:?}"
-                            )));
-                        }
-                    }
-                }
-                OpCode::WriteGlobal => {
-                    let name = self.read_const()?;
-
-                    let n = name.try_as_string().unwrap();
-
-                    if self.globals.insert(n, *self.stack.top()) {
-                        self.globals.remove(n);
-                        return Err(InterpretError::RuntimeError(format!(
-                            "Undefined variable {n:?}"
-                        )));
-                    }
-                }
-                OpCode::WriteGlobal16 => {
-                    let name = self.read_const_16()?;
-
-                    let n = name.try_as_string().unwrap();
-
-                    if self.globals.insert(n, *self.stack.top()) {
-                        self.globals.remove(n);
-                        return Err(InterpretError::RuntimeError(format!(
-                            "Undefined variable {n:?}"
-                        )));
-                    }
-                }
-                OpCode::ReadLocal => {
-                    let slot = self.read_byte()? as usize;
-                    self.stack.push(self.stack.data[self.sp() + slot])?;
-                }
-                OpCode::WriteLocal => {
-                    let slot = self.read_byte()? as usize;
-                    self.stack.data[self.sp() + slot] = *self.stack.top();
-                }
-                OpCode::Nil => {
-                    self.stack.push(Value::Nil)?;
-                }
-                OpCode::True => {
-                    self.stack.push(Value::TRUE)?;
-                }
-                OpCode::False => {
-                    self.stack.push(Value::FALSE)?;
-                }
-                OpCode::Negate => {
-                    self.stack.top_mut().negate()?;
-                }
-                OpCode::Not => {
-                    self.stack.top_mut().not();
-                }
-                OpCode::Print => {
-                    println!("{}", self.stack.pop()?);
-                }
-                OpCode::Pop => {
-                    self.stack.pop()?;
-                }
-                OpCode::StackSub => {
-                    self.stack.cursor -= self.read_byte()? as usize;
-                }
-                OpCode::Jump => {
-                    let offset = self.read_u16()?;
-                    *self.ip() += offset as usize;
-                }
-                OpCode::JumpFalsey => {
-                    let offset = self.read_u16()?;
-                    if self.stack.top().is_falsey() {
-                        *self.ip() += offset as usize;
-                    }
-                }
-                OpCode::JumpTruthy => {
-                    let offset = self.read_u16()?;
-                    if self.stack.top().is_truthy() {
-                        *self.ip() += offset as usize;
-                    }
-                }
-                OpCode::JumpBack => {
-                    let offset = self.read_u16()?;
-                    *self.ip() -= offset as usize;
-                }
-                OpCode::Call => {
-                    let arg_count = self.read_byte()? as usize;
-                    match self.stack.data[self.stack.cursor - 1 - arg_count] {
-                        Value::Function(f) => {
-                            let fun = unsafe {f.as_ref().unwrap()};
-                            if fun.arg_count != arg_count as u8 {
-                                return Err(InterpretError::RuntimeError(format!("{} expects {} args, got {}.", self.stack.data[self.stack.cursor - 1 - arg_count], fun.arg_count, arg_count)))
-                            }
-                            if self.frame_count == MAX_FRAMES {
-                                return Err(InterpretError::RuntimeError("Stack overflow".to_owned()));
-                            }
-
-                            self.frames[self.frame_count] = CallFrame::new(f, (self.stack.cursor - 1) - arg_count);
-                            self.frame_count += 1;
-
-                            debug!("{}", fun.chunk.disassemble(fun.name));
-                            debug!("{}", Self::print_stack(&self.stack, self.sp()));
-                            continue;
-                        }
-                        x => return Err(InterpretError::RuntimeError(format!("Object '{x:?}' is not callable")))
-                    }
-                }
-                // all ops that require 2 operands
-                _ => {
-                    let b = self.stack.pop()?;
-                    let top = self.stack.top_mut();
-
-                    match opcode {
-                        OpCode::Add => {
-                            top.add(&b, &mut self.strings)?;
-                        }
-                        OpCode::Subtract => {
-                            top.sub(&b)?;
-                        }
-                        OpCode::Multiply => {
-                            top.mul(&b)?;
-                        }
-                        OpCode::Divide => {
-                            top.div(&b)?;
-                        }
-                        OpCode::Eq => {
-                            top.equal(&b);
-                        }
-                        OpCode::Neq => {
-                            top.equal(&b);
-                        }
-                        OpCode::Gt => {
-                            top.greater(&b)?;
-                        }
-                        OpCode::GtEq => {
-                            top.greater_equal(&b)?;
-                        }
-                        OpCode::Lt => {
-                            top.less(&b)?;
-                        }
-                        OpCode::LtEq => {
-                            top.less_equal(&b)?;
-                        }
-                        _ => unreachable!(),
-                    }
-                }
+    pub fn step_n(&mut self, mut n: usize) -> Result<(), InterpretError> {
+        while n > 0 {
+            match self.step() {
+                Ok(VMState::Running) => n -= 1,
+                Ok(VMState::Done) => return Ok(()),
+                Err(e) => return Err(e),
             }
-
-            trace!("{}", Self::print_stack(&self.stack, self.frame_ref().sp));
         }
 
         Ok(())
     }
 
+    pub fn step(&mut self) -> Result<VMState, InterpretError> {
+        // let frame = &mut self.frames[self.frame_count - 1];
+        // let ip = &mut frame.ip;
+        // let chunk = unsafe { &frame.func.as_ref().unwrap().chunk };
+        let ip_copy = self.ip_copied();
+
+        let Some(&op) = self.chunk().data.get(ip_copy) else {
+            return Err(InterpretError::RuntimeError(format!(
+                "No instruction at ip {ip_copy}"
+            )));
+        };
+
+        self.clock += 1;
+        if log_enabled!(Level::Trace) {
+            let mut disasm_out = String::new();
+            self.chunk().disassemble_instr(&mut disasm_out, ip_copy);
+            trace!("cycle {}:\n{disasm_out}", self.clock);
+            disasm_out.clear();
+        }
+
+        *self.ip() += 1;
+
+        let opcode = unsafe { std::mem::transmute::<u8, OpCode>(op) };
+
+        match opcode {
+            OpCode::Return => {
+                let result = self.stack.pop()?;
+                self.frame_count -= 1;
+
+                if self.frame_count == 0 {
+                    self.stack.pop()?;
+                    return Ok(VMState::Done);
+                }
+
+                self.stack.cursor = self.frames[self.frame_count].sp;
+                self.stack.push(result)?;
+            }
+            OpCode::Constant => {
+                let value = self.read_const()?;
+                self.stack.push(value).unwrap();
+            }
+            OpCode::Constant16 => {
+                let value = self.read_const_16()?;
+                self.stack.push(value).unwrap();
+            }
+            OpCode::DefGlobal => {
+                let name = self.read_const()?;
+                let Value::String(n) = name else {
+                    return Err(InterpretError::RuntimeError(format!(
+                        "Invalid type for global name. Expected string, got {name:?}"
+                    )));
+                };
+
+                self.globals.insert(n, *self.stack.top());
+
+                self.stack.pop()?;
+            }
+            OpCode::DefGlobal16 => {
+                let name = self.read_const_16()?;
+                let n = name.try_as_string().unwrap();
+
+                self.globals.insert(n, *self.stack.top());
+
+                self.stack.pop()?;
+            }
+            OpCode::ReadGlobal => {
+                let name = self.read_const()?;
+                let n = name.try_as_string().unwrap();
+
+                match self.globals.get(n) {
+                    Some(x) => self.stack.push(*x)?,
+                    None => {
+                        return Err(InterpretError::RuntimeError(format!(
+                            "Undefined variable {n:?}"
+                        )));
+                    }
+                }
+            }
+            OpCode::ReadGlobal16 => {
+                let name = self.read_const_16()?;
+                let n = name.try_as_string().unwrap();
+
+                match self.globals.get(n) {
+                    Some(x) => self.stack.push(*x)?,
+                    None => {
+                        return Err(InterpretError::RuntimeError(format!(
+                            "Undefined variable {n:?}"
+                        )));
+                    }
+                }
+            }
+            OpCode::WriteGlobal => {
+                let name = self.read_const()?;
+
+                let n = name.try_as_string().unwrap();
+
+                if self.globals.insert(n, *self.stack.top()) {
+                    self.globals.remove(n);
+                    return Err(InterpretError::RuntimeError(format!(
+                        "Undefined variable {n:?}"
+                    )));
+                }
+            }
+            OpCode::WriteGlobal16 => {
+                let name = self.read_const_16()?;
+
+                let n = name.try_as_string().unwrap();
+
+                if self.globals.insert(n, *self.stack.top()) {
+                    self.globals.remove(n);
+                    return Err(InterpretError::RuntimeError(format!(
+                        "Undefined variable {n:?}"
+                    )));
+                }
+            }
+            OpCode::ReadLocal => {
+                let slot = self.read_byte()? as usize;
+                self.stack.push(self.stack.data[self.sp() + 1 + slot])?;
+            }
+            OpCode::WriteLocal => {
+                let slot = self.read_byte()? as usize;
+                self.stack.data[self.sp() + 1 + slot] = *self.stack.top();
+            }
+            OpCode::Nil => {
+                self.stack.push(Value::Nil)?;
+            }
+            OpCode::True => {
+                self.stack.push(Value::TRUE)?;
+            }
+            OpCode::False => {
+                self.stack.push(Value::FALSE)?;
+            }
+            OpCode::Negate => {
+                self.stack.top_mut().negate()?;
+            }
+            OpCode::Not => {
+                self.stack.top_mut().not();
+            }
+            OpCode::Print => {
+                println!("{}", self.stack.pop()?);
+            }
+            OpCode::Pop => {
+                self.stack.pop()?;
+            }
+            OpCode::StackSub => {
+                self.stack.cursor -= self.read_byte()? as usize;
+            }
+            OpCode::Jump => {
+                let offset = self.read_u16()?;
+                *self.ip() += offset as usize;
+            }
+            OpCode::JumpFalsey => {
+                let offset = self.read_u16()?;
+                if self.stack.top().is_falsey() {
+                    *self.ip() += offset as usize;
+                }
+            }
+            OpCode::JumpTruthy => {
+                let offset = self.read_u16()?;
+                if self.stack.top().is_truthy() {
+                    *self.ip() += offset as usize;
+                }
+            }
+            OpCode::JumpBack => {
+                let offset = self.read_u16()?;
+                *self.ip() -= offset as usize;
+            }
+            OpCode::Call => {
+                let arg_count = self.read_byte()? as usize;
+                match self.stack.peek(arg_count) {
+                    Value::Function(f) => {
+                        let fun = unsafe { f.as_ref().unwrap() };
+                        if fun.arg_count != arg_count as u8 {
+                            return Err(InterpretError::RuntimeError(format!(
+                                "Function({}) expects {} args, got {}.",
+                                fun.name, fun.arg_count, arg_count
+                            )));
+                        }
+                        if self.frame_count == MAX_FRAMES {
+                            return Err(InterpretError::RuntimeError("Stack overflow".to_owned()));
+                        }
+
+                        self.frames[self.frame_count] =
+                            CallFrame::new(*f, self.stack.cursor - arg_count - 1);
+                        self.frame_count += 1;
+
+                        debug!("{}", fun.chunk.disassemble(fun.name));
+                        // debug!("{}", Self::print_stack(&self.stack, self.sp(), false));
+                        // return Ok(VMState::Running);
+                    }
+                    Value::NativeFn(func) => {
+                        let result = func(
+                            &self.stack.data[self.stack.cursor - arg_count..self.stack.cursor],
+                        );
+                        self.stack.cursor -= arg_count;
+                        *self.stack.top_mut() = result;
+                    }
+                    x => {
+                        return Err(InterpretError::RuntimeError(format!(
+                            "Object '{x:?}' is not callable"
+                        )));
+                    }
+                }
+            }
+            // all ops that require 2 operands
+            _ => {
+                let b = self.stack.pop()?;
+                let top = self.stack.top_mut();
+
+                match opcode {
+                    OpCode::Add => {
+                        top.add(&b, &mut self.strings)?;
+                    }
+                    OpCode::Subtract => {
+                        top.sub(&b)?;
+                    }
+                    OpCode::Multiply => {
+                        top.mul(&b)?;
+                    }
+                    OpCode::Divide => {
+                        top.div(&b)?;
+                    }
+                    OpCode::Eq => {
+                        top.equal(&b);
+                    }
+                    OpCode::Neq => {
+                        top.equal(&b);
+                    }
+                    OpCode::Gt => {
+                        top.greater(&b)?;
+                    }
+                    OpCode::GtEq => {
+                        top.greater_equal(&b)?;
+                    }
+                    OpCode::Lt => {
+                        top.less(&b)?;
+                    }
+                    OpCode::LtEq => {
+                        top.less_equal(&b)?;
+                    }
+                    _ => unreachable!(),
+                }
+            }
+        }
+
+        trace!("{}", Self::print_stack(&self.stack, self.sp(), true));
+
+        Ok(VMState::Running)
+    }
+
     fn read_byte(&mut self) -> Result<u8, InterpretError> {
         let ip = *self.ip();
-        let val = Ok(self.chunk()
+        let val = Ok(self
+            .chunk()
             .data
             .get(ip)
             .copied()
@@ -418,18 +506,26 @@ impl VM {
         self.stack.clear();
     }
 
-    pub fn print_stack(stack: &Stack<MAX_STACK>, sp: usize) -> String {
+    pub fn print_stack(stack: &Stack<MAX_STACK>, sp: usize, full: bool) -> String {
         let mut output = "".to_owned();
 
         let top = stack.cursor;
 
         writeln!(output, "   Stack:").unwrap();
 
-        for (i, v) in stack.data.iter().enumerate().skip(sp) {
+        let skip = if full { 0 } else { sp };
+
+        for (i, v) in stack.data.iter().enumerate().skip(skip) {
             if i >= top {
                 break;
             }
-            writeln!(output, "   # [{i:03}]: {v}").unwrap();
+            let delim = match i.cmp(&sp) {
+                Ordering::Less => "#",
+                Ordering::Equal => "-",
+                Ordering::Greater => "|",
+            };
+
+            writeln!(output, "   {delim} [{i:03}]: {v}").unwrap();
         }
 
         output
@@ -439,11 +535,10 @@ impl VM {
         for frame in self.frames[0..self.frame_count].iter() {
             let func = unsafe { frame.func.as_ref().unwrap() };
             let name = if func.name.is_empty() {
-                    "script"
+                "script"
             } else {
                 func.name
             };
-
 
             error!("[line {}] in {name}", func.chunk.line_for_offset(frame.ip));
         }
