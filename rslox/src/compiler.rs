@@ -66,7 +66,7 @@ impl<'a> Parser<'a> {
             errors: false,
             panic: false,
         };
-        res.heap_objects.push(Value::Function(res.compiler.func, false));
+        res.heap_objects.push(Value::Function(res.compiler.func.into()));
         res.compiler.func.chunk.source = source;
 
         res
@@ -349,7 +349,7 @@ impl<'a> Parser<'a> {
             .compiler
             .func
             .chunk
-            .push_constant(Value::Function(inner_compiler.func, false));
+            .push_constant(Value::Function(inner_compiler.func.into()));
         self.compiler.func.chunk.push_bytes(&[idx as u8]);
 
         for i in 0..inner_compiler.func.upval_count {
@@ -945,7 +945,7 @@ pub struct Compiler {
 
 impl Compiler {
     pub fn new(heap_objects: &mut Vec<Value>) -> Self {
-        let func = Value::alloc_func(heap_objects);
+        let func = unsafe { Value::alloc_func(heap_objects).as_mut() };
         Self {
             func,
             kind: FuncKind::Script,

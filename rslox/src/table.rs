@@ -21,14 +21,11 @@ impl Entry {
     }
 }
 
-struct T(Option<Entry>);
-
 #[derive(Debug, Default)]
 pub struct Table {
     count: u32,
-    pub(crate) // Option entry is the same size as entry so there's no need for tombstone values
-    // dealloc is taken care of through Value::Drop and Vec::Drop
-    entries: Vec<Option<Entry>>,
+    // Option entry is the same size as entry so there's no need for tombstone values
+    pub entries: Vec<Option<Entry>>,
 }
 
 impl Table {

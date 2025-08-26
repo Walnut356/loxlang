@@ -215,9 +215,7 @@ impl Chunk {
                     self.constants[self.data[offset + 1] as usize]
                         .try_as_function()
                         .unwrap()
-                        .0
                         .as_ref()
-                        .unwrap()
                 };
                 writeln!(output, "Closure({func})").unwrap();
 

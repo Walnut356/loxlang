@@ -7,7 +7,7 @@ use crate::{
 };
 // use log::{Level, debug, error, log_enabled, trace};
 use tracing::{debug, instrument, trace, error, Level};
-use std::{cmp::Ordering, collections::BTreeMap, fmt::Write, rc::Rc};
+use std::{cmp::Ordering, collections::BTreeMap, fmt::Write, ptr::NonNull, rc::Rc};
 use thiserror::Error;
 
 const MAX_FRAMES: usize = 64;
@@ -26,24 +26,30 @@ pub enum VMState {
     Done,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct CallFrame {
-    closure: *mut Closure,
+    closure: NonNull<Closure>,
     ip: usize,
     sp: usize,
 }
 
 impl CallFrame {
-    pub fn new(closure: *mut Closure, sp: usize) -> Self {
+    pub fn new(closure: NonNull<Closure>, sp: usize) -> Self {
         Self { closure, ip: 0, sp }
     }
 
     pub fn closure(&self) -> &Closure {
-        unsafe { self.closure.as_ref().unwrap() }
+        unsafe { self.closure.as_ref() }
     }
 
     pub fn closure_mut(&mut self) -> &mut Closure {
-        unsafe { self.closure.as_mut().unwrap() }
+        unsafe { self.closure.as_mut() }
+    }
+}
+
+impl Default for CallFrame {
+    fn default() -> Self {
+        Self { closure: NonNull::dangling(), ip: 0, sp: 0 }
     }
 }
 
@@ -53,7 +59,7 @@ pub struct VM {
     heap_objects: Vec<Value>,
     strings: Table,
     globals: Table,
-    upvalues: BTreeMap<usize, *mut UpVal>,
+    upvalues: BTreeMap<usize, NonNull<UpVal>>,
     frame_count: usize,
     frames: [CallFrame; MAX_FRAMES],
     pub(crate) stack: Box<Stack<MAX_STACK>>,
@@ -124,28 +130,28 @@ impl VM {
                 .disassemble(parser.compiler.func.name)
         );
 
-        self.stack.push(Value::Function(parser.compiler.func, false))?;
+        self.stack.push(Value::Function(parser.compiler.func.into()))?;
 
         #[cfg(stress_gc)]
         {
             self.collect_garbage();
         }
         let closure = Value::alloc_closure(
-            self.stack.pop()?.try_as_function().unwrap().0,
+            self.stack.pop()?.try_as_function().unwrap(),
             &mut self.heap_objects,
         );
 
         self.frames[self.frame_count] = CallFrame::new(closure, self.stack.cursor);
         self.frame_count += 1;
 
-        self.stack.push(Value::Closure(closure, false))?;
+        self.stack.push(Value::Closure(closure))?;
 
-        for val in unsafe { &closure.func.as_ref().unwrap().chunk.constants } {
+        for val in unsafe { &closure.as_ref().func.as_ref().chunk.constants } {
             match val {
                 Value::String(s) => {
                     self.strings.insert(s, Value::Bool(true));
                 }
-                Value::Object(_, _) => todo!(),
+                Value::Object(_) => todo!(),
                 _ => (),
             }
         }
@@ -185,10 +191,8 @@ impl VM {
                 .current_frame()
                 .closure
                 .as_ref()
-                .unwrap()
                 .func
                 .as_ref()
-                .unwrap()
                 .chunk
         }
     }
@@ -402,9 +406,9 @@ impl VM {
             OpCode::Call => {
                 let arg_count = self.read_byte()? as usize;
                 match self.stack.peek(arg_count) {
-                    Value::Closure(c, _) => {
-                        let f = unsafe { c.as_ref().unwrap().func };
-                        let fun = unsafe { f.as_ref().unwrap() };
+                    Value::Closure(c) => {
+                        let f = unsafe { c.as_ref().func };
+                        let fun = unsafe { f.as_ref() };
                         if fun.arg_count != arg_count as u8 {
                             return Err(InterpretError::RuntimeError(format!(
                                 "Function({}) expects {} args, got {}.",
@@ -440,30 +444,30 @@ impl VM {
             OpCode::Closure => {
                 let func = self.read_const()?;
                 match func {
-                    Value::Function(f, _) => {
+                    Value::Function(f) => {
                         #[cfg(stress_gc)]
                         {
                             self.collect_garbage();
                         }
-                        let closure_ptr = Value::alloc_closure(f, &mut self.heap_objects);
-                        let closure = Value::Closure(closure_ptr, false);
+                        let mut closure_ptr = Value::alloc_closure(f, &mut self.heap_objects);
+                        let closure = Value::Closure(closure_ptr);
 
                         self.stack.push(closure)?;
 
-                        for _ in 0..closure_ptr.upvals.capacity() {
+                        for _ in 0..unsafe { closure_ptr.as_ref().upvals.capacity() } {
                             let local = self.read_byte()? != 0;
                             let idx = self.read_byte()? as usize;
 
                             let upval = if local {
-                                let val = &mut self.stack.data[self.sp() + 1 + idx] as *mut _;
+                                let val: NonNull<Value> = (&mut self.stack.data[self.sp() + 1 + idx]).into();
                                 self.capture_upval(self.sp() + 1 + idx, val)
                             } else {
                                 unsafe {
-                                    self.current_frame().closure.as_ref().unwrap().upvals[idx]
+                                    self.current_frame().closure.as_ref().upvals[idx]
                                 }
                             };
 
-                            closure_ptr.upvals.push(upval);
+                            unsafe { closure_ptr.as_mut().upvals.push(upval) };
                         }
                     }
                     x => {
@@ -475,11 +479,11 @@ impl VM {
             }
             OpCode::ReadUpval => {
                 let slot = self.read_byte()? as usize;
-                let val = unsafe { self.current_frame().closure.as_ref().unwrap().upvals[slot] };
+                let val = unsafe { self.current_frame().closure.as_ref().upvals[slot] };
 
-                match unsafe { val.as_mut().unwrap() } {
-                    UpVal::Open(v) => self.stack.push(unsafe { **v })?,
-                    UpVal::Closed(v) => self.stack.push(*v)?,
+                match unsafe { val.as_ref() } {
+                    UpVal::Open(v, _) => self.stack.push(unsafe { v.read() })?,
+                    UpVal::Closed(v, _) => self.stack.push(*v)?,
                 }
             }
             OpCode::WriteUpval => {
@@ -487,10 +491,9 @@ impl VM {
                 match unsafe {
                     self.current_frame().closure_mut().upvals[slot]
                         .as_mut()
-                        .unwrap()
                 } {
-                    UpVal::Open(v) => unsafe { v.write(*self.stack.peek(0)) },
-                    UpVal::Closed(value) => *value = *self.stack.peek(0),
+                    UpVal::Open(v, _) => unsafe { v.write(*self.stack.peek(0)) },
+                    UpVal::Closed(value, _) => *value = *self.stack.peek(0),
                 }
             }
             OpCode::CloseUpVal => {
@@ -589,7 +592,7 @@ impl VM {
         Ok(self.chunk().constants[const_idx])
     }
 
-    fn capture_upval(&mut self, slot: usize, val: *mut Value) -> *mut UpVal {
+    fn capture_upval(&mut self, slot: usize, val: NonNull<Value>) -> NonNull<UpVal> {
         match self.upvalues.get(&slot) {
             Some(v) => *v,
             None => {
@@ -600,7 +603,7 @@ impl VM {
                 let upval = Value::alloc_upval(val, &mut self.heap_objects);
                 self.upvalues.insert(slot, upval);
 
-                upval as *mut _
+                upval
             }
         }
     }
@@ -612,12 +615,12 @@ impl VM {
                 break;
             }
 
-            let val = match unsafe { uv.as_mut().unwrap() } {
-                UpVal::Open(v) => unsafe { **v },
-                UpVal::Closed(_) => panic!("Closed upval in open upval list"),
+            let val = match unsafe { uv.as_ref() } {
+                UpVal::Open(v, _) => unsafe { v.read() },
+                UpVal::Closed(_, _) => panic!("Closed upval in open upval list"),
             };
 
-            unsafe { uv.write(UpVal::Closed(val)) };
+            unsafe { uv.write(UpVal::Closed(val, false)) };
             remove.push(*loc);
         }
 
@@ -637,7 +640,17 @@ impl VM {
 
     pub fn mark_roots(&mut self) {
         for val in self.stack.data[0..self.stack.cursor].iter_mut() {
+            val.mark();
+        }
+        for frame in self.frames[..self.frame_count].iter_mut() {
 
+        }
+        Self::mark_table(&mut self.globals);
+    }
+
+    pub fn mark_table(table: &mut Table) {
+        for entry in table.entries.iter_mut().flatten() {
+            entry.val.mark();
         }
     }
 
@@ -668,7 +681,7 @@ impl VM {
 
     pub fn print_stack_trace(&self) {
         for frame in self.frames[0..self.frame_count].iter() {
-            let func = unsafe { frame.closure.as_ref().unwrap().func.as_ref().unwrap() };
+            let func = unsafe { frame.closure.as_ref().func.as_ref() };
             let name = if func.name.is_empty() {
                 "script"
             } else {

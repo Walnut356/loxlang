@@ -1,15 +1,14 @@
-use std::{ops::Neg, time::UNIX_EPOCH};
+use std::{ops::Neg, ptr::NonNull, time::UNIX_EPOCH};
 
 use strum::VariantNames;
 use strum_macros::*;
-use tracing::{instrument, Level};
+use tracing::{Level, debug, instrument};
 
 use crate::{chunk::Chunk, table::Table, vm::InterpretError};
 
-#[derive(Debug, EnumTryAs, strum_macros::Display, Clone, Copy, PartialEq)]
-pub enum Object {
-    String(&'static str),
-    Object(f64),
+#[derive(Debug, Clone, Copy)]
+pub struct Object {
+    pub marked: bool,
 }
 
 #[derive(Debug, Default)]
@@ -18,6 +17,7 @@ pub struct Function {
     pub chunk: Chunk,
     pub upval_count: u8,
     pub arg_count: u8,
+    pub marked: bool,
 }
 
 impl std::fmt::Display for Function {
@@ -32,17 +32,28 @@ impl std::fmt::Display for Function {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Closure {
-    pub func: *mut Function,
+    pub func: NonNull<Function>,
     /// Stores pointers to Value::Upvalue
-    pub upvals: Vec<*mut UpVal>,
+    pub upvals: Vec<NonNull<UpVal>>,
+    pub marked: bool,
+}
+
+impl Default for Closure {
+    fn default() -> Self {
+        Self {
+            func: NonNull::dangling(),
+            upvals: Default::default(),
+            marked: Default::default(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
 pub enum UpVal {
-    Open(*mut Value),
-    Closed(Value),
+    Open(NonNull<Value>, bool),
+    Closed(Value, bool),
 }
 
 // Copy is implemented instead of a bespoke Clone that properly reallocates the string because we
@@ -59,10 +70,10 @@ pub enum Value {
     // #[strum(to_string = "{0}")]
     String(&'static str),
     // #[strum(to_string = "{0}")]
-    Function(*mut Function, bool),
-    Closure(*mut Closure, bool),
-    UpValue(*mut UpVal, bool),
-    Object(*mut Object, bool),
+    Function(NonNull<Function>),
+    Closure(NonNull<Closure>),
+    UpValue(NonNull<UpVal>),
+    Object(NonNull<Object>),
 }
 
 impl Default for Value {
@@ -79,12 +90,12 @@ impl std::fmt::Display for Value {
             Value::Float(x) => write!(f, "{}", *x),
             Value::NativeFn(_) => write!(f, "<native function>"),
             Value::String(x) => write!(f, "\"{}\"", *x),
-            Value::Function(x, _) => write!(f, "Function({})", unsafe { x.as_ref() }.unwrap().name),
-            Value::Object(x, _) => write!(f, "Object({:?})", *x),
-            Value::Closure(x, _) => write!(f, "Closure(<fn {}>)", unsafe {
-                x.as_ref().unwrap().func.as_ref().unwrap().name
+            Value::Function(x) => write!(f, "Function({})", unsafe { x.as_ref() }.name),
+            Value::Object(x) => write!(f, "Object({:?})", *x),
+            Value::Closure(x) => write!(f, "Closure(<fn {}>)", unsafe {
+                x.as_ref().func.as_ref().name
             }),
-            Value::UpValue(_, _) => write!(f, "<upval>"),
+            Value::UpValue(_) => write!(f, "<upval>"),
         }
     }
 }
@@ -95,7 +106,7 @@ impl PartialEq for Value {
             (Self::Bool(l0), Self::Bool(r0)) => l0 == r0,
             (Self::Float(l0), Self::Float(r0)) => l0 == r0,
             (Self::String(l0), Self::String(r0)) => l0.as_ptr() == r0.as_ptr(),
-            (Self::Object(l0, _), Self::Object(r0, _)) => (*l0).addr() == (*r0).addr(),
+            (Self::Object(l0), Self::Object(r0)) => (*l0).addr() == (*r0).addr(),
             _ => false,
         }
     }
@@ -141,25 +152,38 @@ impl Value {
     }
 
     #[instrument(level = Level::DEBUG, skip(heap_objects))]
-    pub fn alloc_func(heap_objects: &mut Vec<Value>) -> &'static mut Function {
+    pub fn alloc_func(heap_objects: &mut Vec<Value>) -> NonNull<Function> {
         let func = Box::leak(Box::new(Function::default()));
-        heap_objects.push(Value::Function(func, false));
+        let func = unsafe { NonNull::new_unchecked(func) };
+
+        heap_objects.push(Value::Function(func));
 
         func
     }
 
     #[instrument(level = Level::DEBUG, skip(heap_objects))]
-    pub fn alloc_closure(func: *mut Function, heap_objects: &mut Vec<Value>) -> &'static mut Closure {
-        let closure = Box::leak(Box::new(Closure { func, upvals: Vec::new()}));
-        heap_objects.push(Value::Closure(closure, false));
+    pub fn alloc_closure(
+        func: NonNull<Function>,
+        heap_objects: &mut Vec<Value>,
+    ) -> NonNull<Closure> {
+        let closure = Box::leak(Box::new(Closure {
+            func,
+            upvals: Vec::new(),
+            marked: false,
+        }));
+
+        let closure = unsafe { NonNull::new_unchecked(closure) };
+
+            heap_objects.push(Value::Closure(closure));
 
         closure
     }
 
     #[instrument(level = Level::DEBUG, skip(heap_objects))]
-    pub fn alloc_upval(val: *mut Value, heap_objects: &mut Vec<Value>) -> &'static mut UpVal {
-        let upval = Box::leak(Box::new(UpVal::Open(val)));
-        heap_objects.push(Value::UpValue(upval, false));
+    pub fn alloc_upval(val: NonNull<Value>, heap_objects: &mut Vec<Value>) -> NonNull<UpVal> {
+        let upval = Box::leak(Box::new(UpVal::Open(val, false)));
+        let upval = unsafe { NonNull::new_unchecked(upval) };
+            heap_objects.push(Value::UpValue(upval));
 
         upval
     }
@@ -170,30 +194,35 @@ impl Value {
             Value::String(s) => unsafe {
                 let _ = Box::from_raw(s as *const str as *mut str);
             },
-            Value::Object(o, _) => unsafe {
-                let _ = Box::from_raw(o);
+            Value::Object(o) => unsafe {
+                let _ = Box::from_raw(o.as_ptr());
             },
-            Value::Function(f, _) => unsafe {
-                let _ = Box::from_raw(f);
+            Value::Function(f) => unsafe {
+                let _ = Box::from_raw(f.as_ptr());
             },
-            Value::Closure(c, _) => unsafe {
-                let _ = Box::from_raw(c);
+            Value::Closure(c) => unsafe {
+                let _ = Box::from_raw(c.as_ptr());
             },
-            Value::UpValue(v, _) => unsafe {
-                let _ = Box::from_raw(v);
+            Value::UpValue(v) => unsafe {
+                let _ = Box::from_raw(v.as_ptr());
             },
             _ => (),
         }
     }
 
     pub fn mark(&mut self) {
-        match self {
-            Value::String(_) => todo!(),
-            Value::Function(_, mark) |
-            Value::Closure(_, mark) |
-            Value::UpValue(_, mark) |
-            Value::Object(_, mark) => *mark = true,
-            _ => (),
+        unsafe {
+            match self {
+                Value::String(_) => (),
+                Value::Function(f) => f.as_mut().marked = true,
+                Value::Closure(c) => c.as_mut().marked = true,
+                Value::UpValue(u) => match u.as_mut() {
+                    UpVal::Open(_, marked) => *marked = true,
+                    UpVal::Closed(_, marked) => *marked = true,
+                },
+                Value::Object(o) => o.as_mut().marked = true,
+                _ => (),
+            }
         }
     }
 
