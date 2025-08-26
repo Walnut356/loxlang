@@ -1,17 +1,19 @@
-use log::{Level, info};
-use rslox::{init_log,
-    vm::{InterpretError, VM}}
-;
+// use log::Level;
+use rslox::{
+    init_tracing,
+    vm::{InterpretError, VM},
+};
 use std::{
     fs::File,
     io::{self, Read, Write},
     rc::Rc,
 };
+use tracing::{Level, info};
 
-const LOG_LEVEL: Level = Level::Trace;
+const LOG_LEVEL: Level = Level::INFO;
 
 fn main() -> Result<(), InterpretError> {
-    init_log(LOG_LEVEL);
+    init_tracing(LOG_LEVEL);
     let mut args = std::env::args();
     // skip this exe
     args.next();
@@ -45,7 +47,7 @@ fn repl() -> Result<(), InterpretError> {
 
         match vm.interpret(source) {
             Ok(_) => (),
-            Err(e) => println!("{e}")
+            Err(e) => println!("{e}"),
         }
 
         let dur = start.elapsed();
@@ -55,7 +57,6 @@ fn repl() -> Result<(), InterpretError> {
 }
 
 fn run_file(path: &str) -> Result<(), InterpretError> {
-    let start = std::time::Instant::now();
     let mut f = File::open(path).unwrap();
     let mut buffer = String::new();
     f.read_to_string(&mut buffer).unwrap();
@@ -64,11 +65,62 @@ fn run_file(path: &str) -> Result<(), InterpretError> {
 
     let source: Rc<str> = Rc::from(buffer);
 
-    let res = vm.interpret(source);
+    let start = std::time::Instant::now();
+
+    vm.compile(source)?;
 
     let dur = start.elapsed();
+    info!(target: "Compilation time", "{dur:?}");
 
-    info!("Execution time: {dur:?}");
+    let start = std::time::Instant::now();
+
+    let res = vm.run();
+    if res.is_err() {
+        vm.print_stack_trace();
+    }
+
+    let dur = start.elapsed();
+    info!(target: "Execution time", "{dur:?}");
 
     res
 }
+
+// #[cfg(test)]
+// mod tests {
+//     use rslox::*;
+//     use crate::*;
+//     #[test]
+//     fn fib_flat() -> Result<(), InterpretError> {
+//         init_log(Level::Info);
+
+//         run_file(r"C:\coding\Projects\learning\loxlang\test_files\fib.lox")
+//     }
+
+//     #[test]
+//     fn fib_func() -> Result<(), InterpretError> {
+//         init_log(Level::Info);
+
+//         run_file(r"C:\coding\Projects\learning\loxlang\test_files\fib_func.lox")
+//     }
+
+//     #[test]
+//     fn global_closure() -> Result<(), InterpretError> {
+//         init_log(Level::Info);
+
+//         run_file(r"C:\coding\Projects\learning\loxlang\test_files\global_closure.lox")
+//     }
+
+//     #[test]
+//     fn resolver() -> Result<(), InterpretError> {
+//         init_log(Level::Info);
+
+//         run_file(r"C:\coding\Projects\learning\loxlang\test_files\test_resolver.lox")
+//     }
+
+//     #[test]
+//     fn scope() -> Result<(), InterpretError> {
+//         init_log(Level::Info);
+
+//         run_file(r"C:\coding\Projects\learning\loxlang\test_files\scope.lox")
+//     }
+// }

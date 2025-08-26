@@ -2,6 +2,7 @@ use std::{ops::Neg, time::UNIX_EPOCH};
 
 use strum::VariantNames;
 use strum_macros::*;
+use tracing::{instrument, Level};
 
 use crate::{chunk::Chunk, table::Table, vm::InterpretError};
 
@@ -15,6 +16,7 @@ pub enum Object {
 pub struct Function {
     pub name: &'static str,
     pub chunk: Chunk,
+    pub upval_count: u8,
     pub arg_count: u8,
 }
 
@@ -30,6 +32,19 @@ impl std::fmt::Display for Function {
     }
 }
 
+#[derive(Debug, Default)]
+pub struct Closure {
+    pub func: *mut Function,
+    /// Stores pointers to Value::Upvalue
+    pub upvals: Vec<*mut UpVal>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum UpVal {
+    Open(*mut Value),
+    Closed(Value),
+}
+
 // Copy is implemented instead of a bespoke Clone that properly reallocates the string because we
 // don't want to reallocate the string when popping it off the stack
 #[derive(Debug, EnumTryAs, VariantNames, Clone, Copy)]
@@ -40,12 +55,14 @@ pub enum Value {
     Bool(bool),
     // #[strum(to_string = "{0}")]
     Float(f64),
+    NativeFn(fn(&[Value]) -> Value),
     // #[strum(to_string = "{0}")]
     String(&'static str),
     // #[strum(to_string = "{0}")]
-    Function(*mut Function),
-    NativeFn(fn(&[Value]) -> Value),
-    Object(*mut Object),
+    Function(*mut Function, bool),
+    Closure(*mut Closure, bool),
+    UpValue(*mut UpVal, bool),
+    Object(*mut Object, bool),
 }
 
 impl Default for Value {
@@ -60,10 +77,14 @@ impl std::fmt::Display for Value {
             Value::Nil => write!(f, "Nil"),
             Value::Bool(x) => write!(f, "{}", *x),
             Value::Float(x) => write!(f, "{}", *x),
-            Value::String(x) => write!(f, "\"{}\"", *x),
-            Value::Function(x) => write!(f, "Function({})", unsafe { x.as_ref() }.unwrap().name),
-            Value::Object(x) => write!(f, "Object({:?})", *x),
             Value::NativeFn(_) => write!(f, "<native function>"),
+            Value::String(x) => write!(f, "\"{}\"", *x),
+            Value::Function(x, _) => write!(f, "Function({})", unsafe { x.as_ref() }.unwrap().name),
+            Value::Object(x, _) => write!(f, "Object({:?})", *x),
+            Value::Closure(x, _) => write!(f, "Closure(<fn {}>)", unsafe {
+                x.as_ref().unwrap().func.as_ref().unwrap().name
+            }),
+            Value::UpValue(_, _) => write!(f, "<upval>"),
         }
     }
 }
@@ -74,7 +95,7 @@ impl PartialEq for Value {
             (Self::Bool(l0), Self::Bool(r0)) => l0 == r0,
             (Self::Float(l0), Self::Float(r0)) => l0 == r0,
             (Self::String(l0), Self::String(r0)) => l0.as_ptr() == r0.as_ptr(),
-            (Self::Object(l0), Self::Object(r0)) => (*l0).addr() == (*r0).addr(),
+            (Self::Object(l0, _), Self::Object(r0, _)) => (*l0).addr() == (*r0).addr(),
             _ => false,
         }
     }
@@ -96,7 +117,15 @@ impl Value {
     pub fn alloc_str(src: &str, string_table: &mut Table) -> Self {
         let val = match string_table.get_key(src) {
             Some(s) => s,
-            None => Box::leak(Box::<str>::from(src)),
+            None => {
+                let str = Box::leak(Box::<str>::from(src));
+                string_table.insert(
+                    unsafe { (str as *const str).as_ref().unwrap() },
+                    Value::Bool(true),
+                );
+
+                str
+            }
         };
 
         Self::String(val)
@@ -111,14 +140,59 @@ impl Value {
         Self::String(val)
     }
 
+    #[instrument(level = Level::DEBUG, skip(heap_objects))]
+    pub fn alloc_func(heap_objects: &mut Vec<Value>) -> &'static mut Function {
+        let func = Box::leak(Box::new(Function::default()));
+        heap_objects.push(Value::Function(func, false));
+
+        func
+    }
+
+    #[instrument(level = Level::DEBUG, skip(heap_objects))]
+    pub fn alloc_closure(func: *mut Function, heap_objects: &mut Vec<Value>) -> &'static mut Closure {
+        let closure = Box::leak(Box::new(Closure { func, upvals: Vec::new()}));
+        heap_objects.push(Value::Closure(closure, false));
+
+        closure
+    }
+
+    #[instrument(level = Level::DEBUG, skip(heap_objects))]
+    pub fn alloc_upval(val: *mut Value, heap_objects: &mut Vec<Value>) -> &'static mut UpVal {
+        let upval = Box::leak(Box::new(UpVal::Open(val)));
+        heap_objects.push(Value::UpValue(upval, false));
+
+        upval
+    }
+
+    #[instrument(level = Level::DEBUG)]
     pub fn dealloc(self) {
         match self {
             Value::String(s) => unsafe {
                 let _ = Box::from_raw(s as *const str as *mut str);
             },
-            Value::Object(o) => unsafe {
+            Value::Object(o, _) => unsafe {
                 let _ = Box::from_raw(o);
             },
+            Value::Function(f, _) => unsafe {
+                let _ = Box::from_raw(f);
+            },
+            Value::Closure(c, _) => unsafe {
+                let _ = Box::from_raw(c);
+            },
+            Value::UpValue(v, _) => unsafe {
+                let _ = Box::from_raw(v);
+            },
+            _ => (),
+        }
+    }
+
+    pub fn mark(&mut self) {
+        match self {
+            Value::String(_) => todo!(),
+            Value::Function(_, mark) |
+            Value::Closure(_, mark) |
+            Value::UpValue(_, mark) |
+            Value::Object(_, mark) => *mark = true,
             _ => (),
         }
     }

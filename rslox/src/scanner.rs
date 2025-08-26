@@ -135,11 +135,37 @@ impl Scanner {
                 }
                 b'\t' | b' ' | b'\r' => (),
                 b'/' if self.pos + 1 < self.source.len()
-                    && self.peek_byte(self.pos - 1) == b'/' =>
+                    && self.peek_byte(self.pos + 1) == b'/' =>
                 {
                     self.pos += 2;
                     while !self.at_eof() && self.peek_byte(self.pos) != b'\n' {
                         self.pos += 1;
+                    }
+                }
+                b'/' if self.pos + 1 < self.source.len()
+                    && self.peek_byte(self.pos + 1) == b'*' =>
+                {
+                    self.pos += 2;
+                    let mut depth = 1;
+                    while !self.at_eof() {
+                        match self.peek_byte(self.pos) {
+                            b'/' if self.pos + 1 < self.source.len()
+                                && self.peek_byte(self.pos + 1) == b'*' =>
+                            {
+                                self.pos += 2;
+                                depth += 1;
+                            }
+                            b'*' if self.pos + 1 < self.source.len()
+                                && self.peek_byte(self.pos + 1) == b'/' =>
+                            {
+                                self.pos += 2;
+                                depth -= 1;
+                                if depth == 0 {
+                                    break;
+                                }
+                            }
+                            _ => self.pos += 1,
+                        }
                     }
                 }
                 _ => return,

@@ -21,6 +21,8 @@ pub enum OpCode {
     // no 16 bit variants for Read/Write local
     ReadLocal,
     WriteLocal,
+    ReadUpval,
+    WriteUpval,
 
     Negate,
     Add,
@@ -46,6 +48,8 @@ pub enum OpCode {
     JumpTruthy,
     JumpBack,
     Call,
+    Closure,
+    CloseUpVal,
 }
 
 impl OpCode {
@@ -53,16 +57,44 @@ impl OpCode {
     pub fn total_size(&self) -> usize {
         match self {
             OpCode::Constant
+            | OpCode::ReadLocal
+            | OpCode::WriteLocal
             | OpCode::DefGlobal
             | OpCode::ReadGlobal
             | OpCode::WriteGlobal
             | OpCode::StackSub
-            | OpCode::Call => 2,
+            | OpCode::Call
+            | OpCode::ReadUpval
+            | OpCode::WriteUpval => 2,
             OpCode::Constant16
             | OpCode::DefGlobal16
             | OpCode::ReadGlobal16
-            | OpCode::WriteGlobal16 => 3,
-            _ => 1,
+            | OpCode::WriteGlobal16
+            | OpCode::Jump
+            | OpCode::JumpFalsey
+            | OpCode::JumpTruthy
+            | OpCode::JumpBack => 3,
+            OpCode::Return
+            | OpCode::Negate
+            | OpCode::Add
+            | OpCode::Subtract
+            | OpCode::Multiply
+            | OpCode::Divide
+            | OpCode::Nil
+            | OpCode::False
+            | OpCode::True
+            | OpCode::Not
+            | OpCode::Eq
+            | OpCode::Neq
+            | OpCode::Gt
+            | OpCode::GtEq
+            | OpCode::Lt
+            | OpCode::LtEq
+            | OpCode::Print
+            | OpCode::Pop
+            | OpCode::CloseUpVal => 1,
+            // variable sized
+            OpCode::Closure => usize::MAX,
         }
     }
 }
@@ -121,7 +153,8 @@ impl Chunk {
         write!(output, " | {offset:04x} ").unwrap();
 
         let opcode = self.data[offset];
-        match OpCode::from_repr(opcode) {
+        let op = OpCode::from_repr(opcode);
+        match op {
             Some(OpCode::Jump | OpCode::JumpBack | OpCode::JumpFalsey | OpCode::JumpTruthy) => {
                 let idx = unsafe { self.data.as_ptr().byte_add(offset + 1).cast::<u16>().read() }
                     as usize;
@@ -134,7 +167,11 @@ impl Chunk {
 
                 writeln!(output, "{}: {:04x}", OpCode::VARIANTS[opcode as usize], jmp).unwrap();
             }
-            Some(OpCode::StackSub) | Some(OpCode::ReadLocal) | Some(OpCode::WriteLocal) => {
+            Some(OpCode::StackSub)
+            | Some(OpCode::ReadLocal)
+            | Some(OpCode::WriteLocal)
+            | Some(OpCode::ReadUpval)
+            | Some(OpCode::WriteUpval) => {
                 let idx = self.data[offset + 1] as usize;
                 writeln!(output, "{}: {idx:03}", OpCode::VARIANTS[opcode as usize]).unwrap();
             }
@@ -167,14 +204,36 @@ impl Chunk {
                     )
                     .unwrap();
                 } else {
-                     writeln!(
-                        output,
-                        "<error reading opcode>"
-                     ).unwrap()
+                    writeln!(output, "<error reading opcode>").unwrap()
                 }
             }
             Some(OpCode::Call) => {
                 writeln!(output, "Call ({} args)", self.data[offset + 1]).unwrap();
+            }
+            Some(OpCode::Closure) => {
+                let func = unsafe {
+                    self.constants[self.data[offset + 1] as usize]
+                        .try_as_function()
+                        .unwrap()
+                        .0
+                        .as_ref()
+                        .unwrap()
+                };
+                writeln!(output, "Closure({func})").unwrap();
+
+                let mut res = offset + 2;
+                for _ in 0..func.upval_count {
+                    let kind = if self.data[res] == 0 {
+                        "upval"
+                    } else {
+                        "local"
+                    };
+                    writeln!(output, " | {res:04x} | {kind} {}", self.data[res + 1]).unwrap();
+
+                    res += 2;
+                }
+
+                return res;
             }
             Some(_) => {
                 writeln!(output, "{}", OpCode::VARIANTS[opcode as usize]).unwrap();
@@ -185,7 +244,7 @@ impl Chunk {
             }
         }
 
-        OpCode::from_repr(opcode).unwrap().total_size() + offset
+        op.unwrap().total_size() + offset
     }
 
     pub fn push_opcode(&mut self, code: OpCode, line: u32) {

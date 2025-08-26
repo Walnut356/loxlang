@@ -1,16 +1,13 @@
-#[cfg(test)]
-mod test;
-
 use crate::{
     chunk::{Chunk, OpCode},
     compiler::Parser,
-    scanner::{Scanner, Token, TokenKind},
     stack::Stack,
     table::Table,
-    value::{Function, Value},
+    value::{Closure, UpVal, Value},
 };
-use log::{Level, debug, error, log_enabled, trace};
-use std::{cmp::Ordering, fmt::Write, rc::Rc};
+// use log::{Level, debug, error, log_enabled, trace};
+use tracing::{debug, instrument, trace, error, Level};
+use std::{cmp::Ordering, collections::BTreeMap, fmt::Write, rc::Rc};
 use thiserror::Error;
 
 const MAX_FRAMES: usize = 64;
@@ -31,14 +28,22 @@ pub enum VMState {
 
 #[derive(Debug, Default)]
 pub struct CallFrame {
-    func: *mut Function,
+    closure: *mut Closure,
     ip: usize,
     sp: usize,
 }
 
 impl CallFrame {
-    pub fn new(func: *mut Function, sp: usize) -> Self {
-        Self { func, ip: 0, sp }
+    pub fn new(closure: *mut Closure, sp: usize) -> Self {
+        Self { closure, ip: 0, sp }
+    }
+
+    pub fn closure(&self) -> &Closure {
+        unsafe { self.closure.as_ref().unwrap() }
+    }
+
+    pub fn closure_mut(&mut self) -> &mut Closure {
+        unsafe { self.closure.as_mut().unwrap() }
     }
 }
 
@@ -48,9 +53,10 @@ pub struct VM {
     heap_objects: Vec<Value>,
     strings: Table,
     globals: Table,
+    upvalues: BTreeMap<usize, *mut UpVal>,
     frame_count: usize,
     frames: [CallFrame; MAX_FRAMES],
-    pub(crate) stack: Stack<MAX_STACK>,
+    pub(crate) stack: Box<Stack<MAX_STACK>>,
 }
 
 impl Default for VM {
@@ -64,6 +70,7 @@ impl Default for VM {
             frame_count: Default::default(),
             frames: std::array::from_fn(|_| CallFrame::default()),
             stack: Default::default(),
+            upvalues: Default::default(),
         }
     }
 }
@@ -87,7 +94,7 @@ impl VM {
     }
 
     pub fn compile(&mut self, source: Rc<str>) -> Result<(), InterpretError> {
-        let mut parser = Parser::new(source, &mut self.strings);
+        let mut parser = Parser::new(source, &mut self.strings, &mut self.heap_objects);
 
         while !parser.eof() {
             parser.declaration();
@@ -117,41 +124,48 @@ impl VM {
                 .disassemble(parser.compiler.func.name)
         );
 
-        let func = parser.compiler.func as *mut _;
+        self.stack.push(Value::Function(parser.compiler.func, false))?;
 
-        self.frames[self.frame_count] = CallFrame::new(func, self.stack.cursor);
+        #[cfg(stress_gc)]
+        {
+            self.collect_garbage();
+        }
+        let closure = Value::alloc_closure(
+            self.stack.pop()?.try_as_function().unwrap().0,
+            &mut self.heap_objects,
+        );
+
+        self.frames[self.frame_count] = CallFrame::new(closure, self.stack.cursor);
         self.frame_count += 1;
 
-        self.stack.push(Value::Function(func))?;
+        self.stack.push(Value::Closure(closure, false))?;
 
-        for val in unsafe { &func.as_ref().unwrap().chunk.constants } {
+        for val in unsafe { &closure.func.as_ref().unwrap().chunk.constants } {
             match val {
                 Value::String(s) => {
                     self.strings.insert(s, Value::Bool(true));
                 }
-                Value::Object(_) => todo!(),
+                Value::Object(_, _) => todo!(),
                 _ => (),
             }
         }
 
         self.init_natives();
 
-
-
-        if log_enabled!(Level::Trace) {
+        trace!("{}", {
             let mut output = "Globals:\n".to_owned();
 
             for v in self.globals.entries.iter().flatten() {
                 output.push_str(&format!("    {}: {}", v.key, v.val));
             }
-            trace!("{output}");
-        }
+
+            output
+        });
 
         Ok(())
     }
 
     fn init_natives(&mut self) {
-
         let clock = Value::alloc_str("clock", &mut self.strings);
         self.globals
             .insert(clock.try_as_string().unwrap(), Value::CLOCK);
@@ -161,12 +175,22 @@ impl VM {
         &mut self.frames[self.frame_count - 1]
     }
 
-    fn frame_ref(&self) -> &CallFrame {
-        &self.frames[self.frame_count - 1]
-    }
+    // fn frame_ref(&self) -> &CallFrame {
+    //     &self.frames[self.frame_count - 1]
+    // }
 
     fn chunk(&mut self) -> &Chunk {
-        unsafe { &self.current_frame().func.as_ref().unwrap().chunk }
+        unsafe {
+            &self
+                .current_frame()
+                .closure
+                .as_ref()
+                .unwrap()
+                .func
+                .as_ref()
+                .unwrap()
+                .chunk
+        }
     }
 
     fn ip(&mut self) -> &mut usize {
@@ -181,9 +205,9 @@ impl VM {
         self.frames[self.frame_count - 1].sp
     }
 
-    fn slot(&mut self, n: usize) -> &mut Value {
-        &mut self.stack.data[self.sp() + 1 + n]
-    }
+    // fn slot(&mut self, n: usize) -> &mut Value {
+    //     &mut self.stack.data[self.sp() + 1 + n]
+    // }
 
     pub fn run(&mut self) -> Result<(), InterpretError> {
         loop {
@@ -220,12 +244,12 @@ impl VM {
         };
 
         self.clock += 1;
-        if log_enabled!(Level::Trace) {
+
+        trace!(target: "cycle", "{}\n{}", self.clock.clone(), {
             let mut disasm_out = String::new();
             self.chunk().disassemble_instr(&mut disasm_out, ip_copy);
-            trace!("cycle {}:\n{disasm_out}", self.clock);
-            disasm_out.clear();
-        }
+            indent::indent_all_by(9, disasm_out)
+        });
 
         *self.ip() += 1;
 
@@ -234,6 +258,7 @@ impl VM {
         match opcode {
             OpCode::Return => {
                 let result = self.stack.pop()?;
+                self.close_upval(self.sp() + 1);
                 self.frame_count -= 1;
 
                 if self.frame_count == 0 {
@@ -324,11 +349,11 @@ impl VM {
             }
             OpCode::ReadLocal => {
                 let slot = self.read_byte()? as usize;
-                self.stack.push(self.stack.data[self.sp() + 1 + slot])?;
+                self.stack.push(self.stack.data[self.sp() + slot])?;
             }
             OpCode::WriteLocal => {
                 let slot = self.read_byte()? as usize;
-                self.stack.data[self.sp() + 1 + slot] = *self.stack.top();
+                self.stack.data[self.sp() + slot] = *self.stack.top();
             }
             OpCode::Nil => {
                 self.stack.push(Value::Nil)?;
@@ -377,7 +402,8 @@ impl VM {
             OpCode::Call => {
                 let arg_count = self.read_byte()? as usize;
                 match self.stack.peek(arg_count) {
-                    Value::Function(f) => {
+                    Value::Closure(c, _) => {
+                        let f = unsafe { c.as_ref().unwrap().func };
                         let fun = unsafe { f.as_ref().unwrap() };
                         if fun.arg_count != arg_count as u8 {
                             return Err(InterpretError::RuntimeError(format!(
@@ -390,7 +416,7 @@ impl VM {
                         }
 
                         self.frames[self.frame_count] =
-                            CallFrame::new(*f, self.stack.cursor - arg_count - 1);
+                            CallFrame::new(*c, self.stack.cursor - arg_count - 1);
                         self.frame_count += 1;
 
                         debug!("{}", fun.chunk.disassemble(fun.name));
@@ -410,6 +436,67 @@ impl VM {
                         )));
                     }
                 }
+            }
+            OpCode::Closure => {
+                let func = self.read_const()?;
+                match func {
+                    Value::Function(f, _) => {
+                        #[cfg(stress_gc)]
+                        {
+                            self.collect_garbage();
+                        }
+                        let closure_ptr = Value::alloc_closure(f, &mut self.heap_objects);
+                        let closure = Value::Closure(closure_ptr, false);
+
+                        self.stack.push(closure)?;
+
+                        for _ in 0..closure_ptr.upvals.capacity() {
+                            let local = self.read_byte()? != 0;
+                            let idx = self.read_byte()? as usize;
+
+                            let upval = if local {
+                                let val = &mut self.stack.data[self.sp() + 1 + idx] as *mut _;
+                                self.capture_upval(self.sp() + 1 + idx, val)
+                            } else {
+                                unsafe {
+                                    self.current_frame().closure.as_ref().unwrap().upvals[idx]
+                                }
+                            };
+
+                            closure_ptr.upvals.push(upval);
+                        }
+                    }
+                    x => {
+                        return Err(InterpretError::RuntimeError(format!(
+                            "Expected function, got {x:?}"
+                        )));
+                    }
+                }
+            }
+            OpCode::ReadUpval => {
+                let slot = self.read_byte()? as usize;
+                let val = unsafe { self.current_frame().closure.as_ref().unwrap().upvals[slot] };
+
+                match unsafe { val.as_mut().unwrap() } {
+                    UpVal::Open(v) => self.stack.push(unsafe { **v })?,
+                    UpVal::Closed(v) => self.stack.push(*v)?,
+                }
+            }
+            OpCode::WriteUpval => {
+                let slot = self.read_byte()? as usize;
+                match unsafe {
+                    self.current_frame().closure_mut().upvals[slot]
+                        .as_mut()
+                        .unwrap()
+                } {
+                    UpVal::Open(v) => unsafe { v.write(*self.stack.peek(0)) },
+                    UpVal::Closed(value) => *value = *self.stack.peek(0),
+                }
+            }
+            OpCode::CloseUpVal => {
+                // let val = *self.stack.peek(0);
+                self.close_upval(self.stack.cursor - 1);
+                self.stack.pop()?;
             }
             // all ops that require 2 operands
             _ => {
@@ -452,7 +539,7 @@ impl VM {
             }
         }
 
-        trace!("{}", Self::print_stack(&self.stack, self.sp(), true));
+        trace!(target: "Stack", "\n{}", indent::indent_all_by(9, Self::print_stack(&self.stack, self.sp(), true)));
 
         Ok(VMState::Running)
     }
@@ -502,8 +589,56 @@ impl VM {
         Ok(self.chunk().constants[const_idx])
     }
 
+    fn capture_upval(&mut self, slot: usize, val: *mut Value) -> *mut UpVal {
+        match self.upvalues.get(&slot) {
+            Some(v) => *v,
+            None => {
+                #[cfg(stress_gc)]
+                {
+                    self.collect_garbage();
+                }
+                let upval = Value::alloc_upval(val, &mut self.heap_objects);
+                self.upvalues.insert(slot, upval);
+
+                upval as *mut _
+            }
+        }
+    }
+
+    fn close_upval(&mut self, last: usize) {
+        let mut remove = Vec::new();
+        for (loc, uv) in self.upvalues.iter().rev() {
+            if *loc < last {
+                break;
+            }
+
+            let val = match unsafe { uv.as_mut().unwrap() } {
+                UpVal::Open(v) => unsafe { **v },
+                UpVal::Closed(_) => panic!("Closed upval in open upval list"),
+            };
+
+            unsafe { uv.write(UpVal::Closed(val)) };
+            remove.push(*loc);
+        }
+
+        for r in remove {
+            self.upvalues.remove(&r);
+        }
+    }
+
     pub fn reset_stack(&mut self) {
         self.stack.clear();
+    }
+
+    #[instrument(skip_all, level = Level::DEBUG)]
+    pub fn collect_garbage(&mut self) {
+        self.mark_roots();
+    }
+
+    pub fn mark_roots(&mut self) {
+        for val in self.stack.data[0..self.stack.cursor].iter_mut() {
+
+        }
     }
 
     pub fn print_stack(stack: &Stack<MAX_STACK>, sp: usize, full: bool) -> String {
@@ -511,7 +646,7 @@ impl VM {
 
         let top = stack.cursor;
 
-        writeln!(output, "   Stack:").unwrap();
+        // writeln!(output, "Stack:").unwrap();
 
         let skip = if full { 0 } else { sp };
 
@@ -520,12 +655,12 @@ impl VM {
                 break;
             }
             let delim = match i.cmp(&sp) {
-                Ordering::Less => "#",
+                Ordering::Less => "░",
                 Ordering::Equal => "-",
-                Ordering::Greater => "|",
+                Ordering::Greater => "█",
             };
 
-            writeln!(output, "   {delim} [{i:03}]: {v}").unwrap();
+            writeln!(output, "{delim} [{i:03}]: {v}").unwrap();
         }
 
         output
@@ -533,7 +668,7 @@ impl VM {
 
     pub fn print_stack_trace(&self) {
         for frame in self.frames[0..self.frame_count].iter() {
-            let func = unsafe { frame.func.as_ref().unwrap() };
+            let func = unsafe { frame.closure.as_ref().unwrap().func.as_ref().unwrap() };
             let name = if func.name.is_empty() {
                 "script"
             } else {

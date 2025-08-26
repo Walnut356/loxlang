@@ -1,6 +1,6 @@
 use std::rc::Rc;
 
-use log::error;
+use tracing::error;
 
 use crate::{
     chunk::{Chunk, OpCode},
@@ -35,6 +35,7 @@ impl Precedence {
 #[derive(Debug)]
 pub struct Parser<'a> {
     string_table: &'a mut Table,
+    heap_objects: &'a mut Vec<Value>,
     pub compiler: Compiler,
     curr: Token,
     prev: Token,
@@ -44,11 +45,17 @@ pub struct Parser<'a> {
 }
 
 impl<'a> Parser<'a> {
-    pub fn new(source: Rc<str>, string_table: &'a mut Table) -> Self {
+    pub fn new(
+        source: Rc<str>,
+        string_table: &'a mut Table,
+        heap_objects: &'a mut Vec<Value>,
+    ) -> Self {
         let mut scanner = Scanner::new(source.clone());
+        let compiler = Compiler::new(heap_objects);
         let res = Self {
             string_table,
-            compiler: Compiler::default(),
+            heap_objects,
+            compiler,
             curr: scanner.next_token(),
             prev: Token {
                 kind: TokenKind::EOF,
@@ -59,7 +66,7 @@ impl<'a> Parser<'a> {
             errors: false,
             panic: false,
         };
-
+        res.heap_objects.push(Value::Function(res.compiler.func, false));
         res.compiler.func.chunk.source = source;
 
         res
@@ -208,12 +215,74 @@ impl<'a> Parser<'a> {
         }
     }
 
+    pub fn end_scope(&mut self) {
+        self.compiler.scope_depth -= 1;
+
+        let mut stack_pop: u8 = 0;
+
+        for l in self.compiler.locals[1..self.compiler.local_count as usize]
+            .iter()
+            .rev()
+        {
+            if l.depth <= self.compiler.scope_depth {
+                break;
+            }
+
+            if l.captured {
+                // try to batch pops when possible
+                match stack_pop {
+                    0 => {}
+                    1 => {
+                        self.compiler
+                            .func
+                            .chunk
+                            .push_opcode(OpCode::Pop, self.prev.line);
+                    }
+                    x => {
+                        self.compiler
+                            .func
+                            .chunk
+                            .push_opcode(OpCode::StackSub, self.prev.line);
+                        self.compiler.func.chunk.push_bytes(&[stack_pop]);
+                    }
+                }
+
+                stack_pop = 0;
+
+                self.compiler
+                    .func
+                    .chunk
+                    .push_opcode(OpCode::CloseUpVal, self.prev.line);
+            } else {
+                stack_pop += 1;
+            }
+
+            self.compiler.local_count -= 1;
+        }
+
+        match stack_pop {
+            0 => {}
+            1 => {
+                self.compiler
+                    .func
+                    .chunk
+                    .push_opcode(OpCode::Pop, self.prev.line);
+            }
+            x => {
+                self.compiler
+                    .func
+                    .chunk
+                    .push_opcode(OpCode::StackSub, self.prev.line);
+                self.compiler.func.chunk.push_bytes(&[stack_pop]);
+            }
+        }
+    }
+
     pub fn func_decl(&mut self) {
         let global = self.parse_var("Expect function name.");
 
         if self.compiler.local_scope() {
             self.compiler.locals[global as usize].depth = self.compiler.scope_depth;
-            return;
         }
 
         self.function(FuncKind::Func);
@@ -223,12 +292,10 @@ impl<'a> Parser<'a> {
     pub fn function(&mut self, kind: FuncKind) {
         let line = self.prev.line;
 
-        let mut inner_compiler = Compiler {
-            kind,
-            scope_depth: 1,
-            ..Default::default()
-        };
+        let mut inner_compiler = Compiler::new(self.heap_objects);
 
+        inner_compiler.kind = kind;
+        inner_compiler.scope_depth = 1;
         inner_compiler.func.chunk.source = self.scanner.source.clone();
 
         if kind != FuncKind::Script {
@@ -236,6 +303,8 @@ impl<'a> Parser<'a> {
         }
 
         std::mem::swap(&mut self.compiler, &mut inner_compiler);
+
+        self.compiler.parent = Some(&mut inner_compiler as *mut _);
 
         self.consume(TokenKind::LeftParen, "Expect '(' after function name.");
 
@@ -274,12 +343,22 @@ impl<'a> Parser<'a> {
         std::mem::swap(&mut self.compiler, &mut inner_compiler);
 
         // self.compiler.func.chunk.push_opcode(OpCode::Constant, line);
+        self.compiler.func.chunk.push_opcode(OpCode::Closure, line);
 
-        let _ = self
+        let idx = self
             .compiler
             .func
             .chunk
-            .insert_constant(Value::Function(inner_compiler.func as *mut _), line);
+            .push_constant(Value::Function(inner_compiler.func, false));
+        self.compiler.func.chunk.push_bytes(&[idx as u8]);
+
+        for i in 0..inner_compiler.func.upval_count {
+            let val = &inner_compiler.upvalues[i as usize];
+            self.compiler
+                .func
+                .chunk
+                .push_bytes(&[val.local as u8, val.idx]);
+        }
     }
 
     pub fn var_decl(&mut self) {
@@ -342,7 +421,7 @@ impl<'a> Parser<'a> {
             return;
         }
 
-        for local in self.compiler.locals[..self.compiler.count as usize]
+        for local in self.compiler.locals[..self.compiler.local_count as usize]
             .iter()
             .rev()
         {
@@ -362,18 +441,19 @@ impl<'a> Parser<'a> {
     }
 
     pub fn add_local(&mut self) {
-        if self.compiler.count as usize > self.compiler.locals.len() {
+        if self.compiler.local_count as usize > self.compiler.locals.len() {
             self.log_error(&self.prev, "Too many loal variables in function.");
             self.errors = true;
             self.panic = true;
             return;
         }
 
-        self.compiler.locals[self.compiler.count as usize] = Local {
+        self.compiler.locals[self.compiler.local_count as usize] = Local {
             name: self.prev.clone(),
             depth: self.compiler.scope_depth,
+            captured: false,
         };
-        self.compiler.count += 1;
+        self.compiler.local_count += 1;
     }
 
     pub fn statement(&mut self) {
@@ -385,23 +465,9 @@ impl<'a> Parser<'a> {
             TokenKind::LeftBrace => {
                 self.advance();
                 self.compiler.scope_depth += 1;
-                let count = self.compiler.count;
+                // let count = self.compiler.local_count;
                 self.block();
-                self.compiler.scope_depth -= 1;
-
-                // there should always be exactly as many locals before and after a scope.
-                // That means we don't need to iterate through like the book does, we can just
-                // record that number and reset to it.
-                let stack_pop = self.compiler.count - count;
-                if stack_pop > 0 {
-                    self.compiler
-                        .func
-                        .chunk
-                        .push_opcode(OpCode::StackSub, self.prev.line);
-                    self.compiler.func.chunk.push_bytes(&[stack_pop as u8]);
-                }
-
-                self.compiler.count = count;
+                self.end_scope();
             }
             TokenKind::If => {
                 self.advance();
@@ -578,7 +644,9 @@ impl<'a> Parser<'a> {
                     .func
                     .chunk
                     .push_loop(loop_start, self.prev.line);
+
                 loop_start = incr_start;
+
                 self.patch_jump(body_jmp);
             }
         }
@@ -596,7 +664,9 @@ impl<'a> Parser<'a> {
                 .chunk
                 .push_opcode(OpCode::Pop, self.prev.line);
         }
-        self.compiler.scope_depth -= 1;
+
+        // self.compiler.scope_depth -= 1;
+        self.end_scope();
     }
 
     pub fn expression_statement(&mut self) {
@@ -776,25 +846,34 @@ impl<'a> Parser<'a> {
     pub fn variable(&mut self, can_assign: bool) {
         let mut local_idx = self.compiler.resolve_local(self.prev.data);
 
-        let (get_op, set_op) = if let Some(idx) = local_idx {
-            if self.compiler.locals[idx as usize].depth == UNINITIALIZED {
-                self.log_error(
-                    &self.prev,
-                    "Cannot read local variable in its own initializer.",
-                );
-                self.errors = true;
-                self.panic = true;
+        let (get_op, set_op) = match local_idx {
+            Some(idx) => {
+                if self.compiler.locals[idx as usize].depth == UNINITIALIZED {
+                    self.log_error(
+                        &self.prev,
+                        "Cannot read local variable in its own initializer.",
+                    );
+                    self.errors = true;
+                    self.panic = true;
+                }
+                (OpCode::ReadLocal, OpCode::WriteLocal)
             }
-            (OpCode::ReadLocal, OpCode::WriteLocal)
-        } else {
-            local_idx = Some(
-                self.compiler
-                    .func
-                    .chunk
-                    .push_constant(Value::alloc_str(self.prev.data, self.string_table)),
-            );
+            None => match self.compiler.resolve_upvalue(self.prev.data) {
+                Some(idx) => {
+                    local_idx = Some(idx);
+                    (OpCode::ReadUpval, OpCode::WriteUpval)
+                }
+                None => {
+                    local_idx = Some(
+                        self.compiler
+                            .func
+                            .chunk
+                            .push_constant(Value::alloc_str(self.prev.data, self.string_table)),
+                    );
 
-            (OpCode::ReadGlobal, OpCode::WriteGlobal)
+                    (OpCode::ReadGlobal, OpCode::WriteGlobal)
+                }
+            },
         };
 
         let arg = local_idx.unwrap();
@@ -818,6 +897,7 @@ impl<'a> Parser<'a> {
 pub struct Local {
     name: Token,
     depth: u32,
+    captured: bool,
 }
 
 impl Default for Local {
@@ -829,11 +909,13 @@ impl Default for Local {
                 line: 0,
             },
             depth: 0,
+            captured: false,
         }
     }
 }
 
 pub const MAX_LOCALS: usize = 256;
+pub const MAX_UPVAL: usize = 256;
 pub const GLOBAL_SCOPE: u32 = 0;
 pub const UNINITIALIZED: u32 = u32::MAX;
 
@@ -843,29 +925,39 @@ pub enum FuncKind {
     Script,
 }
 
+#[derive(Debug, Default)]
+pub struct CompUpVal {
+    idx: u8,
+    local: bool,
+}
+
 #[derive(Debug)]
 pub struct Compiler {
     pub func: &'static mut Function,
     pub kind: FuncKind,
     pub locals: [Local; MAX_LOCALS],
-    pub count: u32,
+    pub local_count: u32,
+    pub upvalues: [CompUpVal; MAX_UPVAL],
+    pub upval_count: u32,
     pub scope_depth: u32,
-}
-
-impl Default for Compiler {
-    fn default() -> Self {
-        let func = Box::leak(Box::new(Function::default()));
-        Self {
-            func,
-            kind: FuncKind::Script,
-            locals: std::array::from_fn(|_| Local::default()),
-            count: 1,
-            scope_depth: Default::default(),
-        }
-    }
+    pub parent: Option<*mut Compiler>,
 }
 
 impl Compiler {
+    pub fn new(heap_objects: &mut Vec<Value>) -> Self {
+        let func = Value::alloc_func(heap_objects);
+        Self {
+            func,
+            kind: FuncKind::Script,
+            locals: std::array::from_fn(|_| Default::default()),
+            local_count: 1,
+            upvalues: std::array::from_fn(|_| Default::default()),
+            upval_count: 0,
+            scope_depth: Default::default(),
+            parent: None,
+        }
+    }
+
     pub fn global_scope(&self) -> bool {
         self.scope_depth == GLOBAL_SCOPE
     }
@@ -874,18 +966,54 @@ impl Compiler {
         self.scope_depth > GLOBAL_SCOPE
     }
 
-    pub fn add_local(&mut self, token: Token) {
-        self.locals[self.count as usize] = Local {
-            name: token,
-            depth: UNINITIALIZED,
-        };
+    pub fn resolve_local(&self, name: &'static str) -> Option<u16> {
+        self.locals[..self.local_count as usize]
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|x| x.1.name.data == name)
+            .map(|x| x.0 as u16)
     }
 
-    pub fn resolve_local(&self, name: &'static str) -> Option<u16> {
-        self.locals[..self.count as usize]
+    pub fn resolve_upvalue(&mut self, name: &'static str) -> Option<u16> {
+        if let Some(p) = self.parent {
+            let p = unsafe { p.as_mut().unwrap() };
+            let mut res = p.resolve_local(name);
+
+            let local = if let Some(i) = res {
+                p.locals[i as usize].captured = true;
+                true
+            } else {
+                false
+            };
+
+            res = res.or_else(|| p.resolve_upvalue(name));
+
+            return res.map(|x| self.add_upvalue(x as u8, local) as u16);
+        }
+
+        None
+    }
+
+    pub fn add_upvalue(&mut self, idx: u8, local: bool) -> u8 {
+        let count = self.func.upval_count as usize;
+
+        match self.upvalues[..count]
             .iter()
-            .rev()
-            .position(|x| x.name.data == name)
-            .map(|x| x as u16)
+            .find(|x| x.idx == idx && x.local == local)
+        {
+            Some(v) => v.idx,
+            None => {
+                self.upvalues[count] = CompUpVal { idx, local };
+
+                // todo there's a better way to handle this but it's so rare i'm putting it off
+                if count == MAX_UPVAL {
+                    panic!("too many closure variables");
+                }
+                self.func.upval_count += 1;
+
+                count as u8
+            }
+        }
     }
 }

@@ -22,10 +22,30 @@
             "args": [],
             "cwd": "${workspaceFolder}"
         },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug rslox w/ program",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin=rslox",
+                    "--package=rslox"
+                ],
+                "filter": {
+                    "name": "rslox",
+                    "kind": "bin"
+                }
+            },
+            "args": [
+                "./temp.lox"
+            ],
+            "cwd": "${workspaceFolder}"
+        },
                 {
                     "type": "lldb",
                     "request": "launch",
-                    "name": "Debug rslox w/ program",
+                    "name": "Debug rslox GC",
                     "cargo": {
                         "args": [
                             "build",
@@ -37,21 +57,26 @@
                             "kind": "bin"
                         }
                     },
-                    "args": ["./temp.lox"],
-                    "cwd": "${workspaceFolder}"
+                    "args": [
+                        "./temp.lox"
+                    ],
+                    "cwd": "${workspaceFolder}",
+                    "env": {
+                        "RUSTFLAGS": "stress_gc",
+                    }
                 },
-
         {
             "name": ".NET Core Launch (console)",
             "type": "coreclr",
             "request": "launch",
             "preLaunchTask": "dotnet: build",
             "program": "${workspaceFolder}/cslox/bin/Debug/net8.0/loxlang.exe",
-            "args": ["./test_files/closure.lox"],
+            "args": [
+                "./test_files/closure.lox"
+            ],
             "cwd": "${workspaceFolder}",
             "stopAtEntry": false,
             "console": "integratedTerminal"
         }
-
     ]
 }
