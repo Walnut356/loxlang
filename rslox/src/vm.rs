@@ -6,9 +6,9 @@ use crate::{
     value::{Closure, UpVal, Value},
 };
 // use log::{Level, debug, error, log_enabled, trace};
-use tracing::{debug, instrument, trace, error, Level};
 use std::{cmp::Ordering, collections::BTreeMap, fmt::Write, ptr::NonNull, rc::Rc};
 use thiserror::Error;
+use tracing::{Level, debug, error, instrument, trace};
 
 const MAX_FRAMES: usize = 64;
 const MAX_STACK: usize = MAX_FRAMES * u8::MAX as usize;
@@ -49,7 +49,11 @@ impl CallFrame {
 
 impl Default for CallFrame {
     fn default() -> Self {
-        Self { closure: NonNull::dangling(), ip: 0, sp: 0 }
+        Self {
+            closure: NonNull::dangling(),
+            ip: 0,
+            sp: 0,
+        }
     }
 }
 
@@ -63,7 +67,16 @@ pub struct VM {
     frame_count: usize,
     frames: [CallFrame; MAX_FRAMES],
     pub(crate) stack: Box<Stack<MAX_STACK>>,
+    grey_stack: Vec<Value>,
 }
+
+// impl Drop for VM {
+//     fn drop(&mut self) {
+//         for o in &self.heap_objects {
+//             o.dealloc();
+//         }
+//     }
+// }
 
 impl Default for VM {
     fn default() -> Self {
@@ -77,13 +90,14 @@ impl Default for VM {
             frames: std::array::from_fn(|_| CallFrame::default()),
             stack: Default::default(),
             upvalues: Default::default(),
+            grey_stack: Default::default(),
         }
     }
 }
 
 impl VM {
     /// Shortcut for:
-    /// ```
+    /// ```ignore
     /// self.compile()?;
     /// self.run()?;
     /// ```
@@ -130,7 +144,8 @@ impl VM {
                 .disassemble(parser.compiler.func.name)
         );
 
-        self.stack.push(Value::Function(parser.compiler.func.into()))?;
+        self.stack
+            .push(Value::Function(parser.compiler.func.into()))?;
 
         #[cfg(stress_gc)]
         {
@@ -149,7 +164,7 @@ impl VM {
         for val in unsafe { &closure.as_ref().func.as_ref().chunk.constants } {
             match val {
                 Value::String(s) => {
-                    self.strings.insert(s, Value::Bool(true));
+                    self.strings.insert(*s, Value::Bool(true));
                 }
                 Value::Object(_) => todo!(),
                 _ => (),
@@ -172,12 +187,12 @@ impl VM {
     }
 
     fn init_natives(&mut self) {
-        let clock = Value::alloc_str("clock", &mut self.strings);
+        let clock = Value::alloc_str("clock", &mut self.strings, &mut self.heap_objects);
         self.globals
             .insert(clock.try_as_string().unwrap(), Value::CLOCK);
     }
 
-    fn current_frame(&mut self) -> &mut CallFrame {
+    pub fn current_frame(&mut self) -> &mut CallFrame {
         &mut self.frames[self.frame_count - 1]
     }
 
@@ -185,27 +200,19 @@ impl VM {
     //     &self.frames[self.frame_count - 1]
     // }
 
-    fn chunk(&mut self) -> &Chunk {
-        unsafe {
-            &self
-                .current_frame()
-                .closure
-                .as_ref()
-                .func
-                .as_ref()
-                .chunk
-        }
+    pub fn chunk(&mut self) -> &Chunk {
+        unsafe { &self.current_frame().closure.as_ref().func.as_ref().chunk }
     }
 
-    fn ip(&mut self) -> &mut usize {
+    pub fn ip(&mut self) -> &mut usize {
         &mut self.current_frame().ip
     }
 
-    fn ip_copied(&self) -> usize {
+    pub fn ip_copied(&self) -> usize {
         self.frames[self.frame_count - 1].ip
     }
 
-    fn sp(&self) -> usize {
+    pub fn sp(&self) -> usize {
         self.frames[self.frame_count - 1].sp
     }
 
@@ -216,7 +223,7 @@ impl VM {
     pub fn run(&mut self) -> Result<(), InterpretError> {
         loop {
             match self.step() {
-                Ok(VMState::Running) => continue,
+                Ok(VMState::Running) => (),
                 Ok(VMState::Done) => return Ok(()),
                 Err(e) => return Err(e),
             }
@@ -277,10 +284,10 @@ impl VM {
                 let value = self.read_const()?;
                 self.stack.push(value).unwrap();
             }
-            OpCode::Constant16 => {
-                let value = self.read_const_16()?;
-                self.stack.push(value).unwrap();
-            }
+            // OpCode::Constant16 => {
+            //     let value = self.read_const_16()?;
+            //     self.stack.push(value).unwrap();
+            // }
             OpCode::DefGlobal => {
                 let name = self.read_const()?;
                 let Value::String(n) = name else {
@@ -293,64 +300,64 @@ impl VM {
 
                 self.stack.pop()?;
             }
-            OpCode::DefGlobal16 => {
-                let name = self.read_const_16()?;
-                let n = name.try_as_string().unwrap();
+            // OpCode::DefGlobal16 => {
+            //     let name = self.read_const_16()?;
+            //     let n = name.try_as_string().unwrap();
 
-                self.globals.insert(n, *self.stack.top());
+            //     self.globals.insert(n, *self.stack.top());
 
-                self.stack.pop()?;
-            }
+            //     self.stack.pop()?;
+            // }
             OpCode::ReadGlobal => {
                 let name = self.read_const()?;
                 let n = name.try_as_string().unwrap();
 
-                match self.globals.get(n) {
+                match self.globals.get(n.str()) {
                     Some(x) => self.stack.push(*x)?,
                     None => {
                         return Err(InterpretError::RuntimeError(format!(
-                            "Undefined variable {n:?}"
+                            "Undefined variable '{n}'."
                         )));
                     }
                 }
             }
-            OpCode::ReadGlobal16 => {
-                let name = self.read_const_16()?;
-                let n = name.try_as_string().unwrap();
+            // OpCode::ReadGlobal16 => {
+            //     let name = self.read_const_16()?;
+            //     let n = name.try_as_string().unwrap();
 
-                match self.globals.get(n) {
-                    Some(x) => self.stack.push(*x)?,
-                    None => {
-                        return Err(InterpretError::RuntimeError(format!(
-                            "Undefined variable {n:?}"
-                        )));
-                    }
-                }
-            }
+            //     match self.globals.get(n.str()) {
+            //         Some(x) => self.stack.push(*x)?,
+            //         None => {
+            //             return Err(InterpretError::RuntimeError(format!(
+            //                 "Undefined variable '{n}'."
+            //             )));
+            //         }
+            //     }
+            // }
             OpCode::WriteGlobal => {
                 let name = self.read_const()?;
 
                 let n = name.try_as_string().unwrap();
 
                 if self.globals.insert(n, *self.stack.top()) {
-                    self.globals.remove(n);
+                    self.globals.remove(n.str());
                     return Err(InterpretError::RuntimeError(format!(
-                        "Undefined variable {n:?}"
+                        "Undefined variable '{n}'."
                     )));
                 }
             }
-            OpCode::WriteGlobal16 => {
-                let name = self.read_const_16()?;
+            // OpCode::WriteGlobal16 => {
+            //     let name = self.read_const_16()?;
 
-                let n = name.try_as_string().unwrap();
+            //     let n = name.try_as_string().unwrap();
 
-                if self.globals.insert(n, *self.stack.top()) {
-                    self.globals.remove(n);
-                    return Err(InterpretError::RuntimeError(format!(
-                        "Undefined variable {n:?}"
-                    )));
-                }
-            }
+            //     if self.globals.insert(n, *self.stack.top()) {
+            //         self.globals.remove(n.str());
+            //         return Err(InterpretError::RuntimeError(format!(
+            //             "Undefined variable '{n}'."
+            //         )));
+            //     }
+            // }
             OpCode::ReadLocal => {
                 let slot = self.read_byte()? as usize;
                 self.stack.push(self.stack.data[self.sp() + slot])?;
@@ -454,17 +461,16 @@ impl VM {
 
                         self.stack.push(closure)?;
 
-                        for _ in 0..unsafe { closure_ptr.as_ref().upvals.capacity() } {
+                        for _ in 0..unsafe { f.as_ref().upval_count } {
                             let local = self.read_byte()? != 0;
                             let idx = self.read_byte()? as usize;
 
                             let upval = if local {
-                                let val: NonNull<Value> = (&mut self.stack.data[self.sp() + 1 + idx]).into();
-                                self.capture_upval(self.sp() + 1 + idx, val)
+                                let val: NonNull<Value> =
+                                    (&mut self.stack.data[self.sp() + idx]).into();
+                                self.capture_upval(self.sp() + idx, val)
                             } else {
-                                unsafe {
-                                    self.current_frame().closure.as_ref().upvals[idx]
-                                }
+                                unsafe { self.current_frame().closure.as_ref().upvals[idx] }
                             };
 
                             unsafe { closure_ptr.as_mut().upvals.push(upval) };
@@ -488,10 +494,7 @@ impl VM {
             }
             OpCode::WriteUpval => {
                 let slot = self.read_byte()? as usize;
-                match unsafe {
-                    self.current_frame().closure_mut().upvals[slot]
-                        .as_mut()
-                } {
+                match unsafe { self.current_frame().closure_mut().upvals[slot].as_mut() } {
                     UpVal::Open(v, _) => unsafe { v.write(*self.stack.peek(0)) },
                     UpVal::Closed(value, _) => *value = *self.stack.peek(0),
                 }
@@ -508,7 +511,7 @@ impl VM {
 
                 match opcode {
                     OpCode::Add => {
-                        top.add(&b, &mut self.strings)?;
+                        top.add(&b, &mut self.strings, &mut self.heap_objects)?;
                     }
                     OpCode::Subtract => {
                         top.sub(&b)?;
@@ -523,7 +526,7 @@ impl VM {
                         top.equal(&b);
                     }
                     OpCode::Neq => {
-                        top.equal(&b);
+                        top.not_equal(&b);
                     }
                     OpCode::Gt => {
                         top.greater(&b)?;
@@ -636,21 +639,103 @@ impl VM {
     #[instrument(skip_all, level = Level::DEBUG)]
     pub fn collect_garbage(&mut self) {
         self.mark_roots();
+        self.trace_references();
+
+        for e in self.strings.entries.iter_mut() {
+            if e.as_ref().is_some_and(|e| !e.key.is_marked()) {
+                *e = None;
+            }
+        }
+
+        self.sweep();
     }
 
     pub fn mark_roots(&mut self) {
         for val in self.stack.data[0..self.stack.cursor].iter_mut() {
-            val.mark();
+            if !val.is_marked() {
+                val.mark();
+                self.grey_stack.push(*val);
+            }
         }
-        for frame in self.frames[..self.frame_count].iter_mut() {
 
+        for frame in self.frames[..self.frame_count].iter_mut() {
+            let c = unsafe { frame.closure.as_mut() };
+            if !c.marked {
+                c.marked = true;
+                self.grey_stack.push(Value::Closure(frame.closure));
+            }
         }
-        Self::mark_table(&mut self.globals);
+
+        for upval in self.upvalues.values_mut() {
+            match unsafe { upval.as_mut() } {
+                UpVal::Open(_, marked) | UpVal::Closed(_, marked) => {
+                    if !*marked {
+                        *marked = true;
+                        self.grey_stack.push(Value::UpValue(*upval));
+                    }
+                }
+            }
+        }
+
+        for entry in self.globals.entries.iter_mut().flatten() {
+            if !entry.val.is_marked() {
+                entry.val.mark();
+                self.grey_stack.push(entry.val);
+            }
+        }
     }
 
-    pub fn mark_table(table: &mut Table) {
-        for entry in table.entries.iter_mut().flatten() {
-            entry.val.mark();
+    pub fn trace_references(&mut self) {
+        while let Some(val) = self.grey_stack.pop() {
+            match val {
+                Value::Function(mut non_null) => {
+                    for c in unsafe { non_null.as_mut().chunk.constants.iter_mut() } {
+                        if !c.is_marked() {
+                            c.mark();
+                            self.grey_stack.push(*c);
+                        }
+                    }
+                }
+                Value::Closure(mut non_null) => {
+                    let clos = unsafe { non_null.as_mut() };
+                    let mut func = Value::Function(clos.func);
+                    if !func.is_marked() {
+                        func.mark();
+                        self.grey_stack.push(func);
+                    }
+
+                    for v in &clos.upvals {
+                        let mut uv = Value::UpValue(*v);
+                        if !uv.is_marked() {
+                            uv.mark();
+                            self.grey_stack.push(uv);
+                        }
+                    }
+                }
+                Value::UpValue(mut non_null) => {
+                    if let UpVal::Closed(value, _) = unsafe { non_null.as_mut() }
+                        && !value.is_marked()
+                    {
+                        value.mark();
+                        self.grey_stack.push(*value);
+                    }
+                }
+                _ => (),
+            }
+        }
+    }
+
+    pub fn sweep(&mut self) {
+        let mut i = 0;
+
+        while i < self.heap_objects.len() {
+            if self.heap_objects[i].is_marked() {
+                self.heap_objects[i].unmark();
+                i += 1;
+                continue;
+            }
+
+            self.heap_objects.swap_remove(i).dealloc();
         }
     }
 

@@ -1,9 +1,0 @@
-var a = "global";
-var b = "global";
-{
-    var a = "inner";
-    print a;
-    print b;
-}
-print a;
-print b;

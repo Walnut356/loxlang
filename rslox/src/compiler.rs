@@ -3,11 +3,10 @@ use std::rc::Rc;
 use tracing::error;
 
 use crate::{
-    chunk::{Chunk, OpCode},
+    chunk::OpCode,
     scanner::{Scanner, Token, TokenKind},
     table::Table,
     value::{Function, Value},
-    vm::InterpretError,
 };
 
 #[derive(Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
@@ -66,7 +65,8 @@ impl<'a> Parser<'a> {
             errors: false,
             panic: false,
         };
-        res.heap_objects.push(Value::Function(res.compiler.func.into()));
+        res.heap_objects
+            .push(Value::Function(res.compiler.func.into()));
         res.compiler.func.chunk.source = source;
 
         res
@@ -94,7 +94,7 @@ impl<'a> Parser<'a> {
             TokenKind::Error => error!("[Line {}] Error: {message}", token.line),
             TokenKind::EOF => error!("[Line {}] Unexpected EOF. {message}", token.line),
             _ => error!(
-                "[Line {}] Unexpected token: \"{}\". {message}",
+                "[Line {}] Unexpected token: \'{}\'. {message}",
                 token.line, token.data
             ),
         };
@@ -238,7 +238,7 @@ impl<'a> Parser<'a> {
                             .chunk
                             .push_opcode(OpCode::Pop, self.prev.line);
                     }
-                    x => {
+                    _ => {
                         self.compiler
                             .func
                             .chunk
@@ -268,7 +268,7 @@ impl<'a> Parser<'a> {
                     .chunk
                     .push_opcode(OpCode::Pop, self.prev.line);
             }
-            x => {
+            _ => {
                 self.compiler
                     .func
                     .chunk
@@ -312,6 +312,8 @@ impl<'a> Parser<'a> {
             loop {
                 if self.compiler.func.arg_count == 255 {
                     self.log_error(&self.prev, "Can't have more than 255 parameters.");
+                    self.errors = true;
+                    self.panic = true;
                 }
 
                 self.compiler.func.arg_count += 1;
@@ -379,7 +381,7 @@ impl<'a> Parser<'a> {
         self.var_def(global);
     }
 
-    pub fn parse_var(&mut self, msg: &str) -> u16 {
+    pub fn parse_var(&mut self, msg: &str) -> u8 {
         self.consume(TokenKind::Ident, msg);
 
         self.declare_variable();
@@ -387,33 +389,35 @@ impl<'a> Parser<'a> {
         if !self.compiler.global_scope() {
             0
         } else {
-            self.compiler
-                .func
-                .chunk
-                .push_constant(Value::alloc_str(self.prev.data, self.string_table))
+            self.compiler.func.chunk.push_constant(Value::alloc_str(
+                self.prev.data,
+                self.string_table,
+                self.heap_objects,
+            ))
         }
     }
 
-    pub fn var_def(&mut self, idx: u16) {
+    pub fn var_def(&mut self, idx: u8) {
         if self.compiler.local_scope() {
-            self.compiler.locals[idx as usize].depth = self.compiler.scope_depth;
+            self.compiler.locals[self.compiler.local_count as usize - 1].depth =
+                self.compiler.scope_depth;
             return;
         }
 
-        let idx = idx.to_ne_bytes();
-        if idx[1] != 0 {
-            self.compiler
-                .func
-                .chunk
-                .push_opcode(OpCode::DefGlobal16, self.prev.line);
-            self.compiler.func.chunk.push_bytes(&idx);
-        } else {
-            self.compiler
-                .func
-                .chunk
-                .push_opcode(OpCode::DefGlobal, self.prev.line);
-            self.compiler.func.chunk.push_bytes(&[idx[0]]);
-        }
+        // let idx = idx;
+        // if idx[1] != 0 {
+        //     self.compiler
+        //         .func
+        //         .chunk
+        //         .push_opcode(OpCode::DefGlobal16, self.prev.line);
+        //     self.compiler.func.chunk.push_bytes(&idx);
+        // } else {
+        self.compiler
+            .func
+            .chunk
+            .push_opcode(OpCode::DefGlobal, self.prev.line);
+        self.compiler.func.chunk.push_bytes(&[idx]);
+        // }
     }
 
     pub fn declare_variable(&mut self) {
@@ -425,7 +429,7 @@ impl<'a> Parser<'a> {
             .iter()
             .rev()
         {
-            if local.depth != u32::MAX && local.depth < self.compiler.scope_depth {
+            if local.depth != UNINITIALIZED && local.depth < self.compiler.scope_depth {
                 break;
             }
 
@@ -434,6 +438,8 @@ impl<'a> Parser<'a> {
                     &self.prev,
                     "There is already a variable with this name in this scope.",
                 );
+                self.errors = true;
+                self.panic = true;
             }
         }
 
@@ -441,7 +447,7 @@ impl<'a> Parser<'a> {
     }
 
     pub fn add_local(&mut self) {
-        if self.compiler.local_count as usize > self.compiler.locals.len() {
+        if self.compiler.local_count as usize >= MAX_LOCALS {
             self.log_error(&self.prev, "Too many loal variables in function.");
             self.errors = true;
             self.panic = true;
@@ -450,7 +456,7 @@ impl<'a> Parser<'a> {
 
         self.compiler.locals[self.compiler.local_count as usize] = Local {
             name: self.prev.clone(),
-            depth: self.compiler.scope_depth,
+            depth: UNINITIALIZED,
             captured: false,
         };
         self.compiler.local_count += 1;
@@ -507,7 +513,7 @@ impl<'a> Parser<'a> {
     }
 
     pub fn patch_jump(&mut self, idx: usize) {
-        let jump = self.compiler.func.chunk.data.len() - idx - 2;
+        let jump = (self.compiler.func.chunk.data.len()) - idx - 2;
 
         if jump > u16::MAX as usize {
             self.log_error(&self.prev, "Cannot jump more than 16::MAX bytes");
@@ -539,6 +545,7 @@ impl<'a> Parser<'a> {
             .func
             .chunk
             .push_opcode(OpCode::Pop, self.prev.line);
+
         self.statement();
 
         let else_jump_idx = self
@@ -546,12 +553,13 @@ impl<'a> Parser<'a> {
             .func
             .chunk
             .push_jump(OpCode::Jump, self.prev.line);
+
+        self.patch_jump(if_jump_idx);
+
         self.compiler
             .func
             .chunk
             .push_opcode(OpCode::Pop, self.prev.line);
-
-        self.patch_jump(if_jump_idx);
 
         if self.advance_if(TokenKind::Else) {
             self.statement();
@@ -705,9 +713,11 @@ impl<'a> Parser<'a> {
     pub fn return_statement(&mut self) {
         if self.compiler.kind == FuncKind::Script {
             self.log_error(&self.prev, "Can't return from top-level code.");
+            self.errors = true;
+            self.panic = true;
         }
 
-        if self.advance_if(TokenKind::Return) {
+        if self.advance_if(TokenKind::Semicolon) {
             self.compiler
                 .func
                 .chunk
@@ -793,6 +803,8 @@ impl<'a> Parser<'a> {
                 self.expression();
                 if count == 255 {
                     self.log_error(&self.prev, "Can't hvae more than 255 arguments.");
+                    self.errors = true;
+                    self.panic = true;
                 }
                 count += 1;
                 if !self.advance_if(TokenKind::Comma) {
@@ -838,6 +850,7 @@ impl<'a> Parser<'a> {
             Value::alloc_str(
                 &self.prev.data[1..self.prev.data.len() - 1],
                 self.string_table,
+                self.heap_objects,
             ),
             self.prev.line,
         );
@@ -864,12 +877,11 @@ impl<'a> Parser<'a> {
                     (OpCode::ReadUpval, OpCode::WriteUpval)
                 }
                 None => {
-                    local_idx = Some(
-                        self.compiler
-                            .func
-                            .chunk
-                            .push_constant(Value::alloc_str(self.prev.data, self.string_table)),
-                    );
+                    local_idx = Some(self.compiler.func.chunk.push_constant(Value::alloc_str(
+                        self.prev.data,
+                        self.string_table,
+                        self.heap_objects,
+                    )));
 
                     (OpCode::ReadGlobal, OpCode::WriteGlobal)
                 }
@@ -885,11 +897,11 @@ impl<'a> Parser<'a> {
             self.compiler.func.chunk.push_opcode(get_op, self.prev.line);
         }
 
-        if arg > u8::MAX as u16 {
-            self.compiler.func.chunk.push_bytes(&arg.to_ne_bytes());
-        } else {
-            self.compiler.func.chunk.push_bytes(&[arg as u8]);
-        }
+        // if arg > u8::MAX as u16 {
+        //     self.compiler.func.chunk.push_bytes(&arg.to_ne_bytes());
+        // } else {
+        self.compiler.func.chunk.push_bytes(&[arg as u8]);
+        // }
     }
 }
 
@@ -908,7 +920,7 @@ impl Default for Local {
                 data: "",
                 line: 0,
             },
-            depth: 0,
+            depth: UNINITIALIZED,
             captured: false,
         }
     }
@@ -966,16 +978,22 @@ impl Compiler {
         self.scope_depth > GLOBAL_SCOPE
     }
 
-    pub fn resolve_local(&self, name: &'static str) -> Option<u16> {
-        self.locals[..self.local_count as usize]
-            .iter()
-            .enumerate()
-            .rev()
-            .find(|x| x.1.name.data == name)
-            .map(|x| x.0 as u16)
+    pub fn resolve_local(&self, name: &'static str) -> Option<u8> {
+        for i in (0..self.local_count as usize).rev() {
+            if self.locals[i].name.data == name {
+                return Some(i as u8);
+            }
+        }
+        None
+        // self.locals[..self.local_count as usize]
+        //     .iter()
+        //     .enumerate()
+        //     .rev()
+        //     .find(|x| x.1.name.data == name)
+        //     .map(|x| x.0 as u8)
     }
 
-    pub fn resolve_upvalue(&mut self, name: &'static str) -> Option<u16> {
+    pub fn resolve_upvalue(&mut self, name: &'static str) -> Option<u8> {
         if let Some(p) = self.parent {
             let p = unsafe { p.as_mut().unwrap() };
             let mut res = p.resolve_local(name);
@@ -989,7 +1007,7 @@ impl Compiler {
 
             res = res.or_else(|| p.resolve_upvalue(name));
 
-            return res.map(|x| self.add_upvalue(x as u8, local) as u16);
+            return res.map(|x| self.add_upvalue(x as u8, local));
         }
 
         None
@@ -1000,14 +1018,14 @@ impl Compiler {
 
         match self.upvalues[..count]
             .iter()
-            .find(|x| x.idx == idx && x.local == local)
+            .position(|x| x.idx == idx && x.local == local)
         {
-            Some(v) => v.idx,
+            Some(v) => v as u8,
             None => {
                 self.upvalues[count] = CompUpVal { idx, local };
 
                 // todo there's a better way to handle this but it's so rare i'm putting it off
-                if count == MAX_UPVAL {
+                if count + 1 == MAX_UPVAL {
                     panic!("too many closure variables");
                 }
                 self.func.upval_count += 1;

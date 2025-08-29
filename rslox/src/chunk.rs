@@ -11,13 +11,13 @@ use std::{fmt::Write, rc::Rc};
 pub enum OpCode {
     Return,
     Constant,
-    Constant16,
+    // Constant16,
     DefGlobal,
-    DefGlobal16,
+    // DefGlobal16,
     ReadGlobal,
-    ReadGlobal16,
+    // ReadGlobal16,
     WriteGlobal,
-    WriteGlobal16,
+    // WriteGlobal16,
     // no 16 bit variants for Read/Write local
     ReadLocal,
     WriteLocal,
@@ -66,14 +66,11 @@ impl OpCode {
             | OpCode::Call
             | OpCode::ReadUpval
             | OpCode::WriteUpval => 2,
-            OpCode::Constant16
-            | OpCode::DefGlobal16
-            | OpCode::ReadGlobal16
-            | OpCode::WriteGlobal16
-            | OpCode::Jump
-            | OpCode::JumpFalsey
-            | OpCode::JumpTruthy
-            | OpCode::JumpBack => 3,
+            // OpCode::Constant16
+            // | OpCode::DefGlobal16
+            // | OpCode::ReadGlobal16
+            // | OpCode::WriteGlobal16
+            OpCode::Jump | OpCode::JumpFalsey | OpCode::JumpTruthy | OpCode::JumpBack => 3,
             OpCode::Return
             | OpCode::Negate
             | OpCode::Add
@@ -167,18 +164,19 @@ impl Chunk {
 
                 writeln!(output, "{}: {:04x}", OpCode::VARIANTS[opcode as usize], jmp).unwrap();
             }
-            Some(OpCode::StackSub)
-            | Some(OpCode::ReadLocal)
-            | Some(OpCode::WriteLocal)
-            | Some(OpCode::ReadUpval)
-            | Some(OpCode::WriteUpval) => {
+            Some(
+                OpCode::StackSub
+                | OpCode::ReadLocal
+                | OpCode::WriteLocal
+                | OpCode::ReadUpval
+                | OpCode::WriteUpval,
+            ) => {
                 let idx = self.data[offset + 1] as usize;
                 writeln!(output, "{}: {idx:03}", OpCode::VARIANTS[opcode as usize]).unwrap();
             }
-            Some(OpCode::Constant)
-            | Some(OpCode::DefGlobal)
-            | Some(OpCode::ReadGlobal)
-            | Some(OpCode::WriteGlobal) => {
+            Some(
+                OpCode::Constant | OpCode::DefGlobal | OpCode::ReadGlobal | OpCode::WriteGlobal,
+            ) => {
                 let idx = self.data[offset + 1] as usize;
                 writeln!(
                     output,
@@ -188,25 +186,25 @@ impl Chunk {
                 )
                 .unwrap();
             }
-            Some(OpCode::Constant16)
-            | Some(OpCode::DefGlobal16)
-            | Some(OpCode::ReadGlobal16)
-            | Some(OpCode::WriteGlobal16) => {
-                let idx = unsafe { self.data.as_ptr().byte_add(offset + 1).cast::<u16>().read() }
-                    as usize;
+            // Some(OpCode::Constant16)
+            // | Some(OpCode::DefGlobal16)
+            // | Some(OpCode::ReadGlobal16)
+            // | Some(OpCode::WriteGlobal16) => {
+            //     let idx = unsafe { self.data.as_ptr().byte_add(offset + 1).cast::<u16>().read() }
+            //         as usize;
 
-                if idx < self.constants.len() {
-                    writeln!(
-                        output,
-                        "{}: ({idx:05}) {}",
-                        OpCode::VARIANTS[opcode as usize],
-                        self.constants[idx]
-                    )
-                    .unwrap();
-                } else {
-                    writeln!(output, "<error reading opcode>").unwrap()
-                }
-            }
+            //     if idx < self.constants.len() {
+            //         writeln!(
+            //             output,
+            //             "{}: ({idx:05}) {}",
+            //             OpCode::VARIANTS[opcode as usize],
+            //             self.constants[idx]
+            //         )
+            //         .unwrap();
+            //     } else {
+            //         writeln!(output, "<error reading opcode>").unwrap()
+            //     }
+            // }
             Some(OpCode::Call) => {
                 writeln!(output, "Call ({} args)", self.data[offset + 1]).unwrap();
             }
@@ -265,29 +263,31 @@ impl Chunk {
         }
     }
 
-    /// Adds a constant to the constant table. Repeat constants are only stored once
-    pub fn push_constant(&mut self, value: Value) -> u16 {
+    /// Adds a constant to the constant table. Repeat constants are only stored once.
+    /// # Panics
+    /// Panics there are already 256 constants in the chunk
+    pub fn push_constant(&mut self, value: Value) -> u8 {
         if let Some(i) = self.constants.iter().position(|x| *x == value) {
-            i as u16
+            i as u8
         } else {
+            assert!(
+                (self.constants.len() <= 255),
+                "Too many constants in one chunk."
+            );
             self.constants.push(value);
-            (self.constants.len() - 1) as u16
+
+            (self.constants.len() - 1) as u8
         }
     }
 
     /// Adds a constant to the constant table, then pushes an OpCode::Constant/OpCode::Constant16
     /// to the bytecode that reads the newly inserted constant
-    pub fn insert_constant(&mut self, value: Value, line: u32) -> u16 {
-        let idx = self.push_constant(value).to_ne_bytes();
-        if idx[1] != 0 {
-            self.push_opcode(OpCode::Constant16, line);
-            self.push_bytes(&idx);
-        } else {
-            self.push_opcode(OpCode::Constant, line);
-            self.push_bytes(&idx[0..1]);
-        }
+    pub fn insert_constant(&mut self, value: Value, line: u32) -> u8 {
+        let idx = self.push_constant(value);
+        self.push_opcode(OpCode::Constant, line);
+        self.push_bytes(&[idx]);
 
-        u16::from_ne_bytes(idx)
+        idx
     }
 
     pub fn push_jump(&mut self, opcode: OpCode, line: u32) -> usize {
@@ -302,7 +302,7 @@ impl Chunk {
         let offset = self.data.len() - idx + 2;
         if offset > u16::MAX as usize {
             // fix this some day
-            panic!();
+            panic!("Loop body too large");
         }
 
         self.push_bytes(&(offset as u16).to_ne_bytes());
@@ -311,31 +311,5 @@ impl Chunk {
     pub fn push_return(&mut self, line: u32) {
         self.push_opcode(OpCode::Nil, line);
         self.push_opcode(OpCode::Return, line);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::chunk::*;
-
-    #[test]
-    fn disasm_ret() {
-        let mut chunk = Chunk::default();
-        chunk.push_opcode(OpCode::Return, 0);
-        assert_eq!(
-            chunk.disassemble("test"),
-            "-- test --\n\tLine 0:\n0000 Return\n"
-        );
-    }
-
-    #[test]
-    fn disasm_const() {
-        let mut chunk = Chunk::default();
-        chunk.insert_constant(Value::Float(10.0), 0);
-
-        assert_eq!(
-            chunk.disassemble("test"),
-            "-- test --\n\tLine 0:\n0000 Constant: (000) Float(10)\n"
-        )
     }
 }

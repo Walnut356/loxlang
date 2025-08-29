@@ -63,16 +63,24 @@ impl TokenKind {
             Self::NotEq | Self::EqEq => P::Equality,
             Self::Gt | Self::GtEq | Self::Lt | Self::LtEq => P::Comparison,
             Self::LeftParen => P::Call,
+            Self::And => P::And,
+            Self::Or => P::Or,
             _ => P::None,
         }
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Token {
     pub kind: TokenKind,
     pub data: &'static str,
     pub line: u32,
+}
+
+impl Token {
+    pub fn new(kind: TokenKind, data: &'static str, line: u32) -> Self {
+        Self { kind, data, line }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -94,15 +102,18 @@ impl Scanner {
     }
 
     fn new_token(&self, kind: TokenKind) -> Token {
+        // we always want an empty `data` section for EOF. This prevents trailing new-lines and
+        // comments from having spurious data (mostly useful for testing)
+        let pos = if kind == TokenKind::EOF {
+            self.start
+        } else {
+            self.pos.min(self.source.len())
+        };
         Token {
             kind,
             // safety: this should be fine? the Rc lifetime is "bound" to the scanner, which is
             // bound to the lifetime of the Parser, which is the only consumer of tokens.
-            data: unsafe {
-                (&raw const self.source[self.start..self.pos])
-                    .as_ref()
-                    .unwrap()
-            },
+            data: unsafe { (&raw const self.source[self.start..pos]).as_ref().unwrap() },
             line: self.line,
         }
     }
@@ -138,9 +149,11 @@ impl Scanner {
                     && self.peek_byte(self.pos + 1) == b'/' =>
                 {
                     self.pos += 2;
-                    while !self.at_eof() && self.peek_byte(self.pos) != b'\n' {
+                    while !self.at_eof() && self.peek() != b'\n' {
                         self.pos += 1;
                     }
+
+                    self.line += 1;
                 }
                 b'/' if self.pos + 1 < self.source.len()
                     && self.peek_byte(self.pos + 1) == b'*' =>
@@ -148,7 +161,7 @@ impl Scanner {
                     self.pos += 2;
                     let mut depth = 1;
                     while !self.at_eof() {
-                        match self.peek_byte(self.pos) {
+                        match self.peek() {
                             b'/' if self.pos + 1 < self.source.len()
                                 && self.peek_byte(self.pos + 1) == b'*' =>
                             {
@@ -163,6 +176,10 @@ impl Scanner {
                                 if depth == 0 {
                                     break;
                                 }
+                            }
+                            b'\n' => {
+                                self.line += 1;
+                                self.pos += 1;
                             }
                             _ => self.pos += 1,
                         }
@@ -264,14 +281,14 @@ impl Scanner {
             }
             c if c.is_ascii_digit() => {
                 self.consume_while(u8::is_ascii_digit);
-                if !self.at_eof() && self.peek() == b'.' {
+                if (self.source.len() - self.pos) >= 2 && self.peek() == b'.' && self.peek_byte(self.pos + 1).is_ascii_digit() {
                     self.pos += 1;
                     self.consume_while(u8::is_ascii_digit);
                 }
 
                 self.new_token(TokenKind::Number)
             }
-            c if c.is_ascii_alphabetic() => {
+            c if c.is_ascii_alphabetic() || c == b'_' => {
                 self.consume_while(|c| c.is_ascii_alphanumeric() || *c == b'_');
 
                 let mut token = self.new_token(TokenKind::Ident);

@@ -1,0 +1,22 @@
+var a = "first value";
+a = "updated;
+// gc
+print a;
+
+var global = "string";
+{
+    var local = "another";
+    print global + local;
+}
+
+fun make_closure() {
+    var d = "data";
+    fun f() { print a; }
+    return f;
+}
+
+{
+    var closure = make_closure();
+    //gc
+    closure();
+}

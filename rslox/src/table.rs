@@ -2,34 +2,33 @@ use std::hash::Hasher;
 
 use rustc_hash::FxHasher;
 
-use crate::value::Value;
+use crate::value::{LoxStr, Value};
 
 #[derive(Debug, Clone)]
 pub struct Entry {
-    pub(crate) key: &'static str,
+    pub(crate) key: LoxStr,
     pub(crate) val: Value,
 }
 
 impl Entry {
     const TOMBSTONE: Self = Self {
-        key: "",
+        key: LoxStr::EMPTY,
         val: Value::Nil,
     };
 
     pub fn is_tombstone(&self) -> bool {
-        self.val == Self::TOMBSTONE.val
+        self.key == Self::TOMBSTONE.key && self.val == Self::TOMBSTONE.val
     }
 }
 
 #[derive(Debug, Default)]
 pub struct Table {
     count: u32,
-    // Option entry is the same size as entry so there's no need for tombstone values
     pub entries: Vec<Option<Entry>>,
 }
 
 impl Table {
-    const SEED: usize = 0xf25d328ef4145735;
+    const SEED: usize = 0xf25d_328e_f414_5735;
     const MAX_LOAD: f64 = 0.75;
 
     pub fn new() -> Self {
@@ -48,7 +47,6 @@ impl Table {
     fn find_mut(&mut self, key: &'static str) -> &mut Option<Entry> {
         let capacity = self.entries.len();
 
-        // unsafe { std::hint::assert_unchecked(capacity != 0) };
         let mut idx = Self::hash(key) as usize % capacity;
         let mut tombstone_idx = usize::MAX;
 
@@ -61,7 +59,9 @@ impl Table {
                 // with a pointer cast but the compiler should catch it anyway.
                 if self.entries[idx].as_ref().is_none_or(|x| {
                     if x.val == Entry::TOMBSTONE.val {
-                        tombstone_idx = idx;
+                        if tombstone_idx == usize::MAX {
+                            tombstone_idx = idx;
+                        }
                         false
                     } else {
                         true
@@ -82,7 +82,7 @@ impl Table {
         }
     }
 
-    pub fn insert(&mut self, key: &'static str, val: Value) -> bool {
+    pub fn insert(&mut self, key: LoxStr, val: Value) -> bool {
         if (self.count + 1) as usize > (self.entries.len() as f64 * Self::MAX_LOAD) as usize {
             let new_len = if self.entries.is_empty() {
                 8
@@ -96,14 +96,14 @@ impl Table {
             for entry in self.entries.iter().flatten() {
                 if !entry.is_tombstone() {
                     self.count += 1;
-                    let idx = Self::hash(entry.key) as usize % new.len();
+                    let idx = Self::hash(entry.key.str()) as usize % new.len();
                     new[idx] = Some(entry.clone());
                 }
             }
             self.entries.resize_with(new_len, || None);
         }
 
-        let entry = self.find_mut(key);
+        let entry = self.find_mut(key.str());
         let new = entry.is_none();
 
         *entry = Some(Entry { key, val });
@@ -128,21 +128,16 @@ impl Table {
             return false;
         }
 
-        let entry = self.find_mut(key);
-
-        if entry.is_none() {
-            return false;
+        match self.find_mut(key) {
+            Some(e) => {
+                *e = Entry::TOMBSTONE;
+                true
+            }
+            None => false,
         }
-
-        entry.replace(Entry {
-            key: "",
-            val: Value::Bool(true),
-        });
-
-        true
     }
 
-    pub fn get_key(&self, key: &str) -> Option<&'static str> {
+    pub fn get_key(&self, key: &str) -> Option<LoxStr> {
         let capacity = self.entries.len();
 
         if capacity == 0 {
@@ -155,7 +150,7 @@ impl Table {
             {
                 match &self.entries[idx] {
                     Some(e) => {
-                        if e.key == key {
+                        if e.key.str() == key {
                             return Some(e.key);
                         }
                     }
