@@ -326,7 +326,7 @@ mod tests {
         fn assign_to_closure() -> Result<(), InterpretError> {
             test_printed(
                 r"..\test\closure\assign_to_closure.lox",
-                &["local", "after f", "after f", "g"],
+                &["local", "after f", "after f", "after g"],
             )
         }
 

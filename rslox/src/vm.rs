@@ -147,7 +147,7 @@ impl VM {
         self.stack
             .push(Value::Function(parser.compiler.func.into()))?;
 
-        #[cfg(stress_gc)]
+        #[cfg(false)]
         {
             self.collect_garbage();
         }
@@ -452,7 +452,7 @@ impl VM {
                 let func = self.read_const()?;
                 match func {
                     Value::Function(f) => {
-                        #[cfg(stress_gc)]
+                        #[cfg(false)]
                         {
                             self.collect_garbage();
                         }
@@ -599,7 +599,7 @@ impl VM {
         match self.upvalues.get(&slot) {
             Some(v) => *v,
             None => {
-                #[cfg(stress_gc)]
+                #[cfg(false)]
                 {
                     self.collect_garbage();
                 }
@@ -735,6 +735,7 @@ impl VM {
                 continue;
             }
 
+            debug!("Sweeping object: {}", self.heap_objects[i]);
             self.heap_objects.swap_remove(i).dealloc();
         }
     }
