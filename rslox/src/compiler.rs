@@ -65,8 +65,7 @@ impl<'a> Parser<'a> {
             errors: false,
             panic: false,
         };
-        res.heap_objects
-            .push(Value::Function(res.compiler.func.into()));
+        
         res.compiler.func.chunk.source = source;
 
         res

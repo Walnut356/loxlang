@@ -142,7 +142,7 @@ impl LoxStrInner {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy)]
 #[repr(transparent)]
 pub struct LoxStr(pub NonNull<LoxStrInner>);
 
@@ -219,6 +219,17 @@ impl AsRef<str> for LoxStr {
 impl std::fmt::Display for LoxStr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.str())
+    }
+}
+
+impl std::fmt::Debug for LoxStr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "LoxStr(\"{}\", marked: {})",
+            self.str(),
+            self.is_marked()
+        )
     }
 }
 
@@ -308,21 +319,37 @@ impl Value {
         )
     });
 
+    pub fn size(&self) -> usize {
+        match self {
+            Value::Nil | Value::Bool(_) | Value::Float(_) | Value::NativeFn(_) => {
+                size_of::<Value>()
+            }
+            Value::String(lox_str) => lox_str.str().len() + 1,
+            Value::Function(_) => size_of::<Function>(),
+            Value::Closure(_) => size_of::<Closure>(),
+            Value::UpValue(_) => size_of::<UpVal>(),
+            Value::Object(_) => size_of::<Object>(),
+        }
+    }
+
     pub fn alloc_str(src: &str, string_table: &mut Table, heap_objects: &mut Vec<Value>) -> Self {
-        let val = match string_table.get_key(src) {
-            Some(s) => s,
+        if src.is_empty() {
+            // we intentionally don't add the empty string to the heap object or string table
+            // because we cannot deallocate LoxStr::EMPTY
+            return Value::String(LoxStr::EMPTY);
+        }
+        match string_table.get_key(src) {
+            Some(s) => Self::String(s),
             None => {
                 let str = LoxStr::new(src);
                 string_table.insert(str, Value::Bool(true));
 
-                str
+                let res = Self::String(str);
+                heap_objects.push(res);
+
+                res
             }
-        };
-
-        let res = Self::String(val);
-        heap_objects.push(res);
-
-        res
+        }
     }
 
     pub fn alloc_string(
@@ -330,20 +357,18 @@ impl Value {
         string_table: &mut Table,
         heap_objects: &mut Vec<Value>,
     ) -> Self {
-        let val = match string_table.get_key(&src) {
-            Some(s) => s,
+        match string_table.get_key(&src) {
+            Some(s) => Self::String(s),
             None => {
                 let str = LoxStr::new(&src);
                 string_table.insert(str, Value::Bool(true));
 
-                str
+                let res = Self::String(str);
+                heap_objects.push(res);
+
+                res
             }
-        };
-
-        let res = Self::String(val);
-        heap_objects.push(res);
-
-        res
+        }
     }
 
     #[instrument(level = Level::DEBUG, skip(heap_objects))]
@@ -451,6 +476,15 @@ impl Value {
                 _ => true,
             }
         }
+    }
+
+    /// returns true if this value has child allocations, thus if the value should be added to the
+    /// grey stack when garbage collecting
+    pub fn has_child_allocs(&self) -> bool {
+        matches!(
+            self,
+            Value::Function(_) | Value::Closure(_) | Value::UpValue(_)
+        )
     }
 
     /// negates `self` in-place

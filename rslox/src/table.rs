@@ -1,6 +1,7 @@
 use std::hash::Hasher;
 
 use rustc_hash::FxHasher;
+use tracing::{debug, instrument};
 
 use crate::value::{LoxStr, Value};
 
@@ -17,14 +18,14 @@ impl Entry {
     };
 
     pub fn is_tombstone(&self) -> bool {
-        self.key == Self::TOMBSTONE.key && self.val == Self::TOMBSTONE.val
+        self.key.str() == Self::TOMBSTONE.key.str() && self.val == Self::TOMBSTONE.val
     }
 }
 
 #[derive(Debug, Default)]
 pub struct Table {
     count: u32,
-    pub entries: Vec<Option<Entry>>,
+    pub entries: Box<[Option<Entry>]>,
 }
 
 impl Table {
@@ -34,7 +35,7 @@ impl Table {
     pub fn new() -> Self {
         Self {
             count: 0,
-            entries: Vec::default(),
+            entries: Box::default(),
         }
     }
 
@@ -64,13 +65,15 @@ impl Table {
                         }
                         false
                     } else {
-                        true
+                        x.key.str() == key
                     }
                 }) {
                     // return the first tombstone instead of the first empty if we passed a tombstone
                     let i = if tombstone_idx != usize::MAX {
+                        debug!("Fell back to tombstone for key {key} at index {idx}");
                         tombstone_idx
                     } else {
+                        debug!("Found key {key} at index {idx}");
                         idx
                     };
 
@@ -90,21 +93,35 @@ impl Table {
                 self.entries.len() * 2
             };
 
-            let mut new = vec![None; new_len];
+            let mut new = vec![None; new_len].into_boxed_slice();
             self.count = 0;
 
             for entry in self.entries.iter().flatten() {
                 if !entry.is_tombstone() {
                     self.count += 1;
-                    let idx = Self::hash(entry.key.str()) as usize % new.len();
-                    new[idx] = Some(entry.clone());
+                    let mut idx = Self::hash(entry.key.str()) as usize % new.len();
+                    loop {
+                        match &mut new[idx] {
+                            Some(_) => idx += 1,
+                            x => {
+                                *x = Some(entry.clone());
+                                break;
+                            },
+                        }
+                    }
                 }
             }
-            self.entries.resize_with(new_len, || None);
+            self.entries = new;
         }
 
         let entry = self.find_mut(key.str());
+
+        if let Some(e) = entry {
+            assert!(e.val == Entry::TOMBSTONE.val || e.key.str() == key.str());
+        }
+
         let new = entry.is_none();
+        debug!("overwriting {entry:?} with ({key}, {val})");
 
         *entry = Some(Entry { key, val });
 
@@ -112,6 +129,7 @@ impl Table {
             self.count += 1;
         }
 
+        // debug!("After insert (k:{},v:{}): {:#?}", key, val, self);
         new
     }
 
@@ -162,5 +180,9 @@ impl Table {
 
             idx = (idx + 1) % capacity;
         }
+    }
+
+    pub fn clear(&mut self) {
+        self.entries.iter_mut().for_each(|x| *x = None);
     }
 }

@@ -84,7 +84,7 @@ pub fn init_tracing(log_level: impl Into<LevelFilter>) {
         .with_file(false)
         .with_line_number(false)
         .with_max_level(log_level)
-        .with_span_events(FmtSpan::ACTIVE)
+        .with_span_events(FmtSpan::ENTER)
         .with_thread_names(false)
         .with_thread_ids(false)
         .init();
@@ -238,7 +238,7 @@ mod tests {
         fn undefined() -> Result<(), InterpretError> {
             expect_runtime_error(
                 r"..\test\assignment\undefined.lox",
-                "Undefined variable 'unknown'.",
+                "[cycle: 2] Undefined variable 'unknown'.",
             )
         }
     }
@@ -284,20 +284,23 @@ mod tests {
         fn bool() -> Result<(), InterpretError> {
             expect_runtime_error(
                 r"..\test\call\bool.lox",
-                "Object 'Bool(true)' is not callable",
+                "[cycle: 2] Object 'Bool(true)' is not callable",
             )
         }
 
         #[test]
         fn nil() -> Result<(), InterpretError> {
-            expect_runtime_error(r"..\test\call\nil.lox", "Object 'Nil' is not callable")
+            expect_runtime_error(
+                r"..\test\call\nil.lox",
+                "[cycle: 2] Object 'Nil' is not callable",
+            )
         }
 
         #[test]
         fn num() -> Result<(), InterpretError> {
             expect_runtime_error(
                 r"..\test\call\num.lox",
-                "Object 'Float(123.0)' is not callable",
+                "[cycle: 2] Object 'Float(123.0)' is not callable",
             )
         }
 
@@ -311,7 +314,7 @@ mod tests {
         fn string() -> Result<(), InterpretError> {
             expect_runtime_error(
                 r"..\test\call\string.lox",
-                "Object 'String(\"str\")' is not callable",
+                "[cycle: 2] Object 'String(\"str\")' is not callable",
             )
         }
     }
@@ -364,7 +367,10 @@ mod tests {
 
         #[test]
         fn closed_closure_in_function() -> Result<(), InterpretError> {
-            test_printed(r"..\test\closure\closed_closure_in_function.lox", &["local"])
+            test_printed(
+                r"..\test\closure\closed_closure_in_function.lox",
+                &["local"],
+            )
         }
 
         #[test]
@@ -523,7 +529,7 @@ mod tests {
         fn extra_arguments() -> Result<(), InterpretError> {
             expect_runtime_error(
                 r"..\test\function\extra_arguments.lox",
-                "Function(f) expects 2 args, got 4.",
+                "[cycle: 8] Function(f) expects 2 args, got 4.",
             )
         }
 
@@ -531,7 +537,7 @@ mod tests {
         fn local_mutual_recursion() -> Result<(), InterpretError> {
             expect_runtime_error(
                 r"..\test\function\local_mutual_recursion.lox",
-                "Undefined variable 'isOdd'.",
+                "[cycle: 11] Undefined variable 'isOdd'.",
             )
         }
 
@@ -544,7 +550,7 @@ mod tests {
         fn missing_arguments() -> Result<(), InterpretError> {
             expect_runtime_error(
                 r"..\test\function\missing_arguments.lox",
-                "Function(f) expects 2 args, got 1.",
+                "[cycle: 5] Function(f) expects 2 args, got 1.",
             )
         }
 
@@ -676,7 +682,10 @@ mod tests {
 
         #[test]
         fn stack_overflow() -> Result<(), InterpretError> {
-            expect_runtime_error(r"..\test\limit\stack_overflow.lox", "Stack overflow")
+            expect_runtime_error(
+                r"..\test\limit\stack_overflow.lox",
+                "[cycle: 1138] Stack overflow",
+            )
         }
 
         #[test]
@@ -1223,7 +1232,7 @@ mod tests {
         fn error_after_multiline() -> Result<(), InterpretError> {
             expect_runtime_error(
                 r"..\test\string\error_after_multiline.lox",
-                "Undefined variable 'err'.",
+                "[cycle: 3] Undefined variable 'err'.",
             )
         }
 
@@ -1333,7 +1342,7 @@ mod tests {
         fn undefined_global() -> Result<(), InterpretError> {
             expect_runtime_error(
                 r"..\test\variable\undefined_global.lox",
-                "Undefined variable 'notDefined'.",
+                "[cycle: 1] Undefined variable 'notDefined'.",
             )
         }
 
@@ -1341,7 +1350,7 @@ mod tests {
         fn undefined_local() -> Result<(), InterpretError> {
             expect_runtime_error(
                 r"..\test\variable\undefined_local.lox",
-                "Undefined variable 'notDefined'.",
+                "[cycle: 1] Undefined variable 'notDefined'.",
             )
         }
 

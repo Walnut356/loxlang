@@ -2,7 +2,7 @@ use crate::{
     chunk::{Chunk, OpCode},
     compiler::Parser,
     stack::Stack,
-    table::Table,
+    table::{Entry, Table},
     value::{Closure, UpVal, Value},
 };
 // use log::{Level, debug, error, log_enabled, trace};
@@ -57,6 +57,21 @@ impl Default for CallFrame {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct GCStats {
+    pub bytes_allocated: usize,
+    pub next_gc: usize,
+}
+
+impl Default for GCStats {
+    fn default() -> Self {
+        Self {
+            bytes_allocated: Default::default(),
+            next_gc: 1024 * 1024,
+        }
+    }
+}
+
 pub struct VM {
     // chunk: Option<Chunk>,
     clock: usize,
@@ -68,6 +83,7 @@ pub struct VM {
     frames: [CallFrame; MAX_FRAMES],
     pub(crate) stack: Box<Stack<MAX_STACK>>,
     grey_stack: Vec<Value>,
+    gc_stats: GCStats,
 }
 
 // impl Drop for VM {
@@ -91,11 +107,30 @@ impl Default for VM {
             stack: Default::default(),
             upvalues: Default::default(),
             grey_stack: Default::default(),
+            gc_stats: GCStats::default(),
         }
     }
 }
 
 impl VM {
+    pub const GC_HEAP_GROW_FACTOR: usize = 2;
+    /// Deallocates everything necessary and resets the VM back to a default state
+    #[instrument(skip_all)]
+    pub fn reset(&mut self) {
+        for o in &self.heap_objects {
+            o.dealloc();
+        }
+        self.heap_objects.clear();
+        self.globals.clear();
+        self.strings.clear();
+        self.upvalues.clear();
+        // no point rewriting the bits to default values since they can't be read
+        // without being overwritten first
+        self.stack.cursor = 0;
+        self.grey_stack.clear();
+        self.frame_count = 0;
+    }
+
     /// Shortcut for:
     /// ```ignore
     /// self.compile()?;
@@ -147,8 +182,7 @@ impl VM {
         self.stack
             .push(Value::Function(parser.compiler.func.into()))?;
 
-        #[cfg(false)]
-        {
+        if self.time_to_gc() {
             self.collect_garbage();
         }
         let closure = Value::alloc_closure(
@@ -161,17 +195,23 @@ impl VM {
 
         self.stack.push(Value::Closure(closure))?;
 
-        for val in unsafe { &closure.as_ref().func.as_ref().chunk.constants } {
-            match val {
-                Value::String(s) => {
-                    self.strings.insert(*s, Value::Bool(true));
-                }
-                Value::Object(_) => todo!(),
-                _ => (),
-            }
-        }
+        // for val in unsafe { &closure.as_ref().func.as_ref().chunk.constants } {
+        //     match val {
+        //         Value::String(s) => {
+        //             self.strings.insert(*s, Value::Bool(true));
+        //         }
+        //         Value::Object(_) => todo!(),
+        //         _ => (),
+        //     }
+        // }
 
         self.init_natives();
+
+        // we do this here just to prevent passing the gc stats everywhere
+        // it's also convenient because we don't garbage collect during the compile phase at all
+        for o in &self.heap_objects {
+            self.gc_stats.bytes_allocated += o.size();
+        }
 
         trace!("{}", {
             let mut output = "Globals:\n".to_owned();
@@ -224,8 +264,15 @@ impl VM {
         loop {
             match self.step() {
                 Ok(VMState::Running) => (),
-                Ok(VMState::Done) => return Ok(()),
-                Err(e) => return Err(e),
+                Ok(VMState::Done) => {
+                    self.reset();
+
+                    return Ok(());
+                }
+                Err(e) => {
+                    self.reset();
+                    return Err(e);
+                }
             }
         }
     }
@@ -234,8 +281,14 @@ impl VM {
         while n > 0 {
             match self.step() {
                 Ok(VMState::Running) => n -= 1,
-                Ok(VMState::Done) => return Ok(()),
-                Err(e) => return Err(e),
+                Ok(VMState::Done) => {
+                    self.reset();
+                    return Ok(());
+                }
+                Err(e) => {
+                    self.reset();
+                    return Err(e);
+                }
             }
         }
 
@@ -250,7 +303,8 @@ impl VM {
 
         let Some(&op) = self.chunk().data.get(ip_copy) else {
             return Err(InterpretError::RuntimeError(format!(
-                "No instruction at ip {ip_copy}"
+                "[cycle: {}] No instruction at ip {ip_copy}",
+                self.clock
             )));
         };
 
@@ -292,7 +346,8 @@ impl VM {
                 let name = self.read_const()?;
                 let Value::String(n) = name else {
                     return Err(InterpretError::RuntimeError(format!(
-                        "Invalid type for global name. Expected string, got {name:?}"
+                        "[cycle: {}] Invalid type for global name. Expected string, got {name:?}",
+                        self.clock
                     )));
                 };
 
@@ -311,12 +366,14 @@ impl VM {
             OpCode::ReadGlobal => {
                 let name = self.read_const()?;
                 let n = name.try_as_string().unwrap();
+                let tmp = n.str();
 
                 match self.globals.get(n.str()) {
                     Some(x) => self.stack.push(*x)?,
                     None => {
                         return Err(InterpretError::RuntimeError(format!(
-                            "Undefined variable '{n}'."
+                            "[cycle: {}] Undefined variable '{n}'.",
+                            self.clock
                         )));
                     }
                 }
@@ -342,7 +399,8 @@ impl VM {
                 if self.globals.insert(n, *self.stack.top()) {
                     self.globals.remove(n.str());
                     return Err(InterpretError::RuntimeError(format!(
-                        "Undefined variable '{n}'."
+                        "[cycle: {}] Undefined variable '{n}'.",
+                        self.clock
                     )));
                 }
             }
@@ -418,12 +476,15 @@ impl VM {
                         let fun = unsafe { f.as_ref() };
                         if fun.arg_count != arg_count as u8 {
                             return Err(InterpretError::RuntimeError(format!(
-                                "Function({}) expects {} args, got {}.",
-                                fun.name, fun.arg_count, arg_count
+                                "[cycle: {}] Function({}) expects {} args, got {}.",
+                                self.clock, fun.name, fun.arg_count, arg_count
                             )));
                         }
                         if self.frame_count == MAX_FRAMES {
-                            return Err(InterpretError::RuntimeError("Stack overflow".to_owned()));
+                            return Err(InterpretError::RuntimeError(format!(
+                                "[cycle: {}] Stack overflow",
+                                self.clock
+                            )));
                         }
 
                         self.frames[self.frame_count] =
@@ -443,7 +504,8 @@ impl VM {
                     }
                     x => {
                         return Err(InterpretError::RuntimeError(format!(
-                            "Object '{x:?}' is not callable"
+                            "[cycle: {}] Object '{x:?}' is not callable",
+                            self.clock
                         )));
                     }
                 }
@@ -452,12 +514,12 @@ impl VM {
                 let func = self.read_const()?;
                 match func {
                     Value::Function(f) => {
-                        #[cfg(false)]
-                        {
+                        if self.time_to_gc() {
                             self.collect_garbage();
                         }
                         let mut closure_ptr = Value::alloc_closure(f, &mut self.heap_objects);
                         let closure = Value::Closure(closure_ptr);
+                        self.gc_stats.bytes_allocated += closure.size();
 
                         self.stack.push(closure)?;
 
@@ -478,7 +540,8 @@ impl VM {
                     }
                     x => {
                         return Err(InterpretError::RuntimeError(format!(
-                            "Expected function, got {x:?}"
+                            "[cycle: {}] Expected function, got {x:?}",
+                            self.clock
                         )));
                     }
                 }
@@ -511,7 +574,14 @@ impl VM {
 
                 match opcode {
                     OpCode::Add => {
+                        if self.time_to_gc() {
+                            self.collect_garbage();
+                        }
+                        let top = self.stack.top_mut();
                         top.add(&b, &mut self.strings, &mut self.heap_objects)?;
+                        if matches!(top, Value::String(_)) {
+                            self.gc_stats.bytes_allocated += top.size();
+                        }
                     }
                     OpCode::Subtract => {
                         top.sub(&b)?;
@@ -552,12 +622,9 @@ impl VM {
 
     fn read_byte(&mut self) -> Result<u8, InterpretError> {
         let ip = *self.ip();
-        let val = Ok(self
-            .chunk()
-            .data
-            .get(ip)
-            .copied()
-            .ok_or_else(|| InterpretError::RuntimeError("Constant data missing".to_owned()))?);
+        let val = Ok(self.chunk().data.get(ip).copied().ok_or_else(|| {
+            InterpretError::RuntimeError(format!("[cycle: {}] Constant data missing", self.clock))
+        })?);
 
         *self.ip() += 1;
 
@@ -567,9 +634,10 @@ impl VM {
     fn read_u16(&mut self) -> Result<u16, InterpretError> {
         let ip = *self.ip();
         if self.chunk().data.len() <= ip + 1 {
-            return Err(InterpretError::RuntimeError(
-                "Constant data missing".to_owned(),
-            ));
+            return Err(InterpretError::RuntimeError(format!(
+                "[cycle: {}] Constant data missing",
+                self.clock
+            )));
         }
 
         let val = unsafe { Ok(self.chunk().data.as_ptr().byte_add(ip).cast::<u16>().read()) };
@@ -584,26 +652,25 @@ impl VM {
 
         Ok(self.chunk().constants[const_idx])
     }
+    // fn read_const_16(&mut self) -> Result<Value, InterpretError> {
+    //     let const_idx_lo = self.read_byte()? as usize;
 
-    fn read_const_16(&mut self) -> Result<Value, InterpretError> {
-        let const_idx_lo = self.read_byte()? as usize;
+    //     let const_idx_hi = self.read_byte()? as usize;
 
-        let const_idx_hi = self.read_byte()? as usize;
+    //     let const_idx = (const_idx_hi << 8) | const_idx_lo;
 
-        let const_idx = (const_idx_hi << 8) | const_idx_lo;
-
-        Ok(self.chunk().constants[const_idx])
-    }
+    //     Ok(self.chunk().constants[const_idx])
+    // }
 
     fn capture_upval(&mut self, slot: usize, val: NonNull<Value>) -> NonNull<UpVal> {
         match self.upvalues.get(&slot) {
             Some(v) => *v,
             None => {
-                #[cfg(false)]
-                {
+                if self.time_to_gc() {
                     self.collect_garbage();
                 }
                 let upval = Value::alloc_upval(val, &mut self.heap_objects);
+                self.gc_stats.bytes_allocated += Value::UpValue(upval).size();
                 self.upvalues.insert(slot, upval);
 
                 upval
@@ -638,6 +705,8 @@ impl VM {
 
     #[instrument(skip_all, level = Level::DEBUG)]
     pub fn collect_garbage(&mut self) {
+        let before = self.gc_stats.bytes_allocated;
+        debug!("bytes before: {before}");
         self.mark_roots();
         self.trace_references();
 
@@ -648,13 +717,22 @@ impl VM {
         }
 
         self.sweep();
+        self.gc_stats.next_gc = self.gc_stats.bytes_allocated * Self::GC_HEAP_GROW_FACTOR;
+
+        let diff = before - self.gc_stats.bytes_allocated;
+        debug!(
+            "bytes after: {} (swept: {diff}, next: {})",
+            self.gc_stats.bytes_allocated, self.gc_stats.next_gc
+        );
     }
 
     pub fn mark_roots(&mut self) {
         for val in self.stack.data[0..self.stack.cursor].iter_mut() {
             if !val.is_marked() {
                 val.mark();
-                self.grey_stack.push(*val);
+                if val.has_child_allocs() {
+                    self.grey_stack.push(*val);
+                }
             }
         }
 
@@ -662,6 +740,7 @@ impl VM {
             let c = unsafe { frame.closure.as_mut() };
             if !c.marked {
                 c.marked = true;
+                // no need to check since closures always have children
                 self.grey_stack.push(Value::Closure(frame.closure));
             }
         }
@@ -678,9 +757,15 @@ impl VM {
         }
 
         for entry in self.globals.entries.iter_mut().flatten() {
+            if !entry.key.is_marked() {
+                entry.key.mark();
+                // no point adding strings to the grey stack since they're terminal nodes anyway
+            }
             if !entry.val.is_marked() {
                 entry.val.mark();
-                self.grey_stack.push(entry.val);
+                if entry.val.has_child_allocs() {
+                    self.grey_stack.push(entry.val);
+                }
             }
         }
     }
@@ -692,7 +777,9 @@ impl VM {
                     for c in unsafe { non_null.as_mut().chunk.constants.iter_mut() } {
                         if !c.is_marked() {
                             c.mark();
-                            self.grey_stack.push(*c);
+                            if c.has_child_allocs() {
+                                self.grey_stack.push(*c);
+                            }
                         }
                     }
                 }
@@ -708,7 +795,9 @@ impl VM {
                         let mut uv = Value::UpValue(*v);
                         if !uv.is_marked() {
                             uv.mark();
-                            self.grey_stack.push(uv);
+                            if uv.has_child_allocs() {
+                                self.grey_stack.push(uv);
+                            }
                         }
                     }
                 }
@@ -717,7 +806,9 @@ impl VM {
                         && !value.is_marked()
                     {
                         value.mark();
-                        self.grey_stack.push(*value);
+                        if value.has_child_allocs() {
+                            self.grey_stack.push(*value);
+                        }
                     }
                 }
                 _ => (),
@@ -735,9 +826,14 @@ impl VM {
                 continue;
             }
 
-            debug!("Sweeping object: {}", self.heap_objects[i]);
-            self.heap_objects.swap_remove(i).dealloc();
+            let val = self.heap_objects.swap_remove(i);
+            self.gc_stats.bytes_allocated -= val.size();
+            val.dealloc();
         }
+    }
+
+    pub fn time_to_gc(&self) -> bool {
+        self.gc_stats.bytes_allocated > self.gc_stats.next_gc
     }
 
     pub fn print_stack(stack: &Stack<MAX_STACK>, sp: usize, full: bool) -> String {

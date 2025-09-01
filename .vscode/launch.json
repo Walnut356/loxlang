@@ -28,6 +28,7 @@
             "name": "Debug rslox w/ program",
             "cargo": {
                 "args": [
+                    "+stage1",
                     "build",
                     "--bin=rslox",
                     "--package=rslox"
