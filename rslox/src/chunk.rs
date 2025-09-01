@@ -50,6 +50,9 @@ pub enum OpCode {
     Call,
     Closure,
     CloseUpVal,
+    Class,
+    WriteProperty,
+    ReadProperty,
 }
 
 impl OpCode {
@@ -65,7 +68,10 @@ impl OpCode {
             | OpCode::StackSub
             | OpCode::Call
             | OpCode::ReadUpval
-            | OpCode::WriteUpval => 2,
+            | OpCode::WriteUpval
+            | OpCode::Class
+            | OpCode::WriteProperty
+            | OpCode::ReadProperty => 2,
             // OpCode::Constant16
             // | OpCode::DefGlobal16
             // | OpCode::ReadGlobal16
@@ -175,7 +181,13 @@ impl Chunk {
                 writeln!(output, "{}: {idx:03}", OpCode::VARIANTS[opcode as usize]).unwrap();
             }
             Some(
-                OpCode::Constant | OpCode::DefGlobal | OpCode::ReadGlobal | OpCode::WriteGlobal,
+                OpCode::Constant
+                | OpCode::DefGlobal
+                | OpCode::ReadGlobal
+                | OpCode::WriteGlobal
+                | OpCode::Class
+                | OpCode::ReadProperty
+                | OpCode::WriteProperty,
             ) => {
                 let idx = self.data[offset + 1] as usize;
                 writeln!(

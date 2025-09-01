@@ -334,6 +334,52 @@ impl VM {
                 self.stack.cursor = self.frames[self.frame_count].sp;
                 self.stack.push(result)?;
             }
+            OpCode::Class => {
+                let name = self.read_const()?;
+                let class =
+                    Value::alloc_class(name.try_as_string().unwrap(), &mut self.heap_objects);
+                self.stack.push(Value::Class(class))?;
+            }
+            OpCode::ReadProperty => match *self.stack.top() {
+                Value::Instance(i) => {
+                    let field = self.read_const()?.try_as_string().unwrap();
+                    let inst = unsafe { i.as_ref() };
+
+                    match inst.fields.get_ref(field.str()) {
+                        Some(x) => *self.stack.top_mut() = *x,
+                        None => {
+                            return Err(InterpretError::RuntimeError(format!(
+                                "[cycle {}] Undefined property {} for class {}",
+                                self.clock,
+                                field.str(),
+                                inst.class_name().str()
+                            )));
+                        }
+                    }
+                }
+                x => {
+                    return Err(InterpretError::RuntimeError(format!(
+                        "[cycle: {}] Cannot read property of non-instance: {:?}",
+                        self.clock, x
+                    )));
+                }
+            },
+            OpCode::WriteProperty => match *self.stack.peek(1) {
+                Value::Instance(mut i) => {
+                    let inst = unsafe { i.as_mut() };
+                    let field = self.read_const()?.try_as_string().unwrap();
+                    let val = self.stack.pop()?;
+
+                    inst.fields.insert(field, val);
+                    *self.stack.top_mut() = val;
+                }
+                x => {
+                    return Err(InterpretError::RuntimeError(format!(
+                        "[cycle: {}] Cannot write property of non-instance: {:?}",
+                        self.clock, x
+                    )));
+                }
+            },
             OpCode::Constant => {
                 let value = self.read_const()?;
                 self.stack.push(value).unwrap();
@@ -471,6 +517,10 @@ impl VM {
             OpCode::Call => {
                 let arg_count = self.read_byte()? as usize;
                 match self.stack.peek(arg_count) {
+                    Value::Class(c) => {
+                        self.stack.data[self.stack.cursor - arg_count - 1] =
+                            Value::Instance(Value::alloc_instance(*c, &mut self.heap_objects));
+                    }
                     Value::Closure(c) => {
                         let f = unsafe { c.as_ref().func };
                         let fun = unsafe { f.as_ref() };
@@ -757,10 +807,9 @@ impl VM {
         }
 
         for entry in self.globals.entries.iter_mut().flatten() {
-            if !entry.key.is_marked() {
-                entry.key.mark();
-                // no point adding strings to the grey stack since they're terminal nodes anyway
-            }
+            // no point adding strings to the grey stack since they're terminal nodes anyway
+            entry.key.mark();
+
             if !entry.val.is_marked() {
                 entry.val.mark();
                 if entry.val.has_child_allocs() {
@@ -808,6 +857,32 @@ impl VM {
                         value.mark();
                         if value.has_child_allocs() {
                             self.grey_stack.push(*value);
+                        }
+                    }
+                }
+                Value::Class(mut c) => {
+                    let class = unsafe { c.as_mut() };
+
+                    // no point doing the check since strings can't create cycles anyway
+                    class.name.mark();
+                }
+                Value::Instance(mut i) => {
+                    let inst = unsafe { i.as_mut() };
+
+                    let mut x = Value::Class(inst.class);
+                    if !x.is_marked() {
+                        x.mark();
+                        self.grey_stack.push(x);
+                    }
+
+                    for entry in inst.fields.entries.iter_mut().flatten() {
+                        entry.key.mark();
+
+                        if !entry.val.is_marked() {
+                            entry.val.mark();
+                            if entry.val.has_child_allocs() {
+                                self.grey_stack.push(entry.val);
+                            }
                         }
                     }
                 }

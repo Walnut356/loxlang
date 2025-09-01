@@ -10,8 +10,22 @@ use tracing::{Level, instrument};
 use crate::{chunk::Chunk, table::Table, vm::InterpretError};
 
 #[derive(Debug, Clone, Copy)]
-pub struct Object {
+pub struct Class {
     pub marked: bool,
+    pub name: LoxStr,
+}
+
+#[derive(Debug, Clone)]
+pub struct Instance {
+    pub marked: bool,
+    pub class: NonNull<Class>,
+    pub fields: Table,
+}
+
+impl Instance {
+    pub fn class_name(&self) -> LoxStr {
+        unsafe { self.class.as_ref().name }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -22,18 +36,6 @@ pub struct Function {
     pub arg_count: u8,
     pub marked: bool,
 }
-
-// impl Default for Function {
-//     fn default() -> Self {
-//         Self {
-//             name: Default::default(),
-//             chunk: Default::default(),
-//             upval_count: Default::default(),
-//             arg_count: Default::default(),
-//             marked: true,
-//         }
-//     }
-// }
 
 impl std::fmt::Display for Function {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -250,7 +252,8 @@ pub enum Value {
     Function(NonNull<Function>),
     Closure(NonNull<Closure>),
     UpValue(NonNull<UpVal>),
-    Object(NonNull<Object>),
+    Class(NonNull<Class>),
+    Instance(NonNull<Instance>),
 }
 
 impl Default for Value {
@@ -268,11 +271,23 @@ impl std::fmt::Display for Value {
             Value::NativeFn(_) => write!(f, "<native fn>"),
             Value::String(x) => write!(f, "{}", x.str()),
             Value::Function(x) => write!(f, "Function({})", unsafe { x.as_ref() }.name),
-            Value::Object(x) => write!(f, "Object({:?})", *x),
             Value::Closure(x) => write!(f, "Closure(<fn {}>)", unsafe {
                 x.as_ref().func.as_ref().name
             }),
             Value::UpValue(_) => write!(f, "<upval>"),
+            Value::Class(x) => write!(f, "Class({:?})", unsafe { x.as_ref().name.str() }),
+            Value::Instance(x) => {write!(
+                f,
+                "Instance({:?} {{",
+                unsafe { x.as_ref().class.as_ref().name.str() },
+            )?;
+            for e in unsafe { x.as_ref().fields.entries.iter().flatten()} {
+                write!(f, "{}: {}, ", e.key.str(), e.val)?;
+            }
+
+            write!(f, "}})")
+
+        },
         }
     }
 }
@@ -288,7 +303,18 @@ impl std::fmt::Debug for Value {
             Self::Function(arg0) => f.debug_tuple("Function").field(arg0).finish(),
             Self::Closure(arg0) => f.debug_tuple("Closure").field(arg0).finish(),
             Self::UpValue(arg0) => f.debug_tuple("UpValue").field(arg0).finish(),
-            Self::Object(arg0) => f.debug_tuple("Object").field(arg0).finish(),
+            Self::Class(arg0) => f.debug_tuple("Class").field(arg0).finish(),
+            Self::Instance(arg0) => {
+                let inst = unsafe { arg0.as_ref() };
+                let class = unsafe { inst.class.as_ref() };
+                let mut x = f.debug_struct(class.name.str());
+                for field in inst.fields.entries.iter().flatten() {
+                    x.field(field.key.str(), &field.val);
+                }
+
+                x.finish()
+            }
+
         }
     }
 }
@@ -300,7 +326,7 @@ impl PartialEq for Value {
             (Self::Bool(l0), Self::Bool(r0)) => l0 == r0,
             (Self::Float(l0), Self::Float(r0)) => l0 == r0,
             (Self::String(l0), Self::String(r0)) => std::ptr::addr_eq(l0.0.as_ptr(), r0.0.as_ptr()),
-            (Self::Object(l0), Self::Object(r0)) => (*l0).addr() == (*r0).addr(),
+            (Self::Class(l0), Self::Class(r0)) => (*l0).addr() == (*r0).addr(),
             _ => false,
         }
     }
@@ -328,7 +354,8 @@ impl Value {
             Value::Function(_) => size_of::<Function>(),
             Value::Closure(_) => size_of::<Closure>(),
             Value::UpValue(_) => size_of::<UpVal>(),
-            Value::Object(_) => size_of::<Object>(),
+            Value::Class(_) => size_of::<Class>(),
+            Value::Instance(_) => size_of::<Instance>(),
         }
     }
 
@@ -357,6 +384,11 @@ impl Value {
         string_table: &mut Table,
         heap_objects: &mut Vec<Value>,
     ) -> Self {
+        if src.is_empty() {
+            // we intentionally don't add the empty string to the heap object or string table
+            // because we cannot deallocate LoxStr::EMPTY
+            return Value::String(LoxStr::EMPTY);
+        }
         match string_table.get_key(&src) {
             Some(s) => Self::String(s),
             None => {
@@ -371,7 +403,7 @@ impl Value {
         }
     }
 
-    #[instrument(level = Level::DEBUG, skip(heap_objects))]
+    // #[instrument(level = Level::TRACE, skip(heap_objects))]
     pub fn alloc_func(heap_objects: &mut Vec<Value>) -> NonNull<Function> {
         let func = Box::leak(Box::new(Function::default()));
         let func = unsafe { NonNull::new_unchecked(func) };
@@ -381,7 +413,7 @@ impl Value {
         func
     }
 
-    #[instrument(level = Level::DEBUG, skip(heap_objects), fields(deref=unsafe{func.as_ref().to_string()}))]
+    // #[instrument(level = Level::TRACE, skip(heap_objects), fields(deref=unsafe{func.as_ref().to_string()}))]
     pub fn alloc_closure(
         func: NonNull<Function>,
         heap_objects: &mut Vec<Value>,
@@ -399,7 +431,7 @@ impl Value {
         closure
     }
 
-    #[instrument(level = Level::DEBUG, skip(heap_objects))]
+    // #[instrument(level = Level::TRACE, skip(heap_objects))]
     pub fn alloc_upval(val: NonNull<Value>, heap_objects: &mut Vec<Value>) -> NonNull<UpVal> {
         let upval = Box::leak(Box::new(UpVal::Open(val, false)));
         let upval = unsafe { NonNull::new_unchecked(upval) };
@@ -408,13 +440,36 @@ impl Value {
         upval
     }
 
-    #[instrument(level = Level::DEBUG)]
+    pub fn alloc_class(name: LoxStr, heap_objects: &mut Vec<Value>) -> NonNull<Class> {
+        let class = Box::leak(Box::new(Class {
+            marked: false,
+            name,
+        }));
+        let class = unsafe { NonNull::new_unchecked(class) };
+        heap_objects.push(Value::Class(class));
+
+        class
+    }
+
+    pub fn alloc_instance(class: NonNull<Class>, heap_objects: &mut Vec<Value>) -> NonNull<Instance> {
+        let inst = Box::leak(Box::new(Instance {
+            marked: false,
+            class,
+            fields: Table::new(),
+        }));
+        let inst = unsafe { NonNull::new_unchecked(inst) };
+        heap_objects.push(Value::Instance(inst));
+
+        inst
+    }
+
+    #[instrument(level = Level::TRACE)]
     pub fn dealloc(self) {
         match self {
             Value::String(s) => unsafe {
                 let _ = Box::from_raw(s.0.as_ptr());
             },
-            Value::Object(o) => unsafe {
+            Value::Class(o) => unsafe {
                 let _ = Box::from_raw(o.as_ptr());
             },
             Value::Function(f) => unsafe {
@@ -426,6 +481,9 @@ impl Value {
             Value::UpValue(v) => unsafe {
                 let _ = Box::from_raw(v.as_ptr());
             },
+            Value::Instance(i) => unsafe {
+                let _ = Box::from_raw(i.as_ptr());
+            }
             _ => (),
         }
     }
@@ -440,7 +498,7 @@ impl Value {
                     UpVal::Open(_, marked) => *marked = true,
                     UpVal::Closed(_, marked) => *marked = true,
                 },
-                Value::Object(o) => o.as_mut().marked = true,
+                Value::Class(o) => o.as_mut().marked = true,
                 _ => (),
             }
         }
@@ -456,7 +514,7 @@ impl Value {
                     UpVal::Open(_, marked) => *marked = false,
                     UpVal::Closed(_, marked) => *marked = false,
                 },
-                Value::Object(o) => o.as_mut().marked = false,
+                Value::Class(o) => o.as_mut().marked = false,
                 _ => (),
             }
         }
@@ -472,7 +530,7 @@ impl Value {
                     UpVal::Open(_, marked) => *marked,
                     UpVal::Closed(_, marked) => *marked,
                 },
-                Value::Object(o) => o.as_ref().marked,
+                Value::Class(o) => o.as_ref().marked,
                 _ => true,
             }
         }
@@ -483,7 +541,7 @@ impl Value {
     pub fn has_child_allocs(&self) -> bool {
         matches!(
             self,
-            Value::Function(_) | Value::Closure(_) | Value::UpValue(_)
+            Value::Function(_) | Value::Closure(_) | Value::UpValue(_) | Value::Class(_)
         )
     }
 

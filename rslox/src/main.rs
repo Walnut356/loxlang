@@ -2,7 +2,7 @@
 use rslox::{init_tracing, repl, run_file, value::Value, vm::InterpretError};
 use tracing::Level;
 
-const LOG_LEVEL: Level = Level::INFO;
+const LOG_LEVEL: Level = Level::TRACE;
 
 fn main() -> Result<(), InterpretError> {
     init_tracing(LOG_LEVEL);

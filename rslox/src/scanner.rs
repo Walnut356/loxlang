@@ -62,7 +62,7 @@ impl TokenKind {
             Self::Slash | Self::Star => P::Factor,
             Self::NotEq | Self::EqEq => P::Equality,
             Self::Gt | Self::GtEq | Self::Lt | Self::LtEq => P::Comparison,
-            Self::LeftParen => P::Call,
+            Self::LeftParen | Self::Dot => P::Call,
             Self::And => P::And,
             Self::Or => P::Or,
             _ => P::None,

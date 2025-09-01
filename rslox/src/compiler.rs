@@ -65,7 +65,7 @@ impl<'a> Parser<'a> {
             errors: false,
             panic: false,
         };
-        
+
         res.compiler.func.chunk.source = source;
 
         res
@@ -136,7 +136,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    pub fn infix_rule(&mut self, token_kind: TokenKind) {
+    pub fn infix_rule(&mut self, token_kind: TokenKind, can_assign: bool) {
         match token_kind {
             TokenKind::Minus
             | TokenKind::Plus
@@ -151,6 +151,7 @@ impl<'a> Parser<'a> {
             TokenKind::And => self.and(),
             TokenKind::Or => self.or(),
             TokenKind::LeftParen => self.call(),
+            TokenKind::Dot => self.dot(can_assign),
             _ => (),
         }
     }
@@ -164,7 +165,7 @@ impl<'a> Parser<'a> {
         while p <= self.curr.kind.precedence() {
             self.advance();
 
-            self.infix_rule(self.prev.kind);
+            self.infix_rule(self.prev.kind, can_assign);
         }
 
         if can_assign && self.advance_if(TokenKind::Eq) {
@@ -176,6 +177,10 @@ impl<'a> Parser<'a> {
 
     pub fn declaration(&mut self) {
         match self.peek_next() {
+            TokenKind::Class => {
+                self.advance();
+                self.class_decl();
+            }
             TokenKind::Fun => {
                 self.advance();
                 self.func_decl();
@@ -275,6 +280,30 @@ impl<'a> Parser<'a> {
                 self.compiler.func.chunk.push_bytes(&[stack_pop]);
             }
         }
+    }
+
+    pub fn class_decl(&mut self) {
+        self.consume(TokenKind::Ident, "Expect class name");
+        let name_constant = self.compiler.func.chunk.push_constant(Value::alloc_str(
+            self.prev.data,
+            self.string_table,
+            self.heap_objects,
+        ));
+
+        self.declare_variable();
+
+        self.compiler
+            .func
+            .chunk
+            .push_opcode(OpCode::Class, self.prev.line);
+
+        self.compiler.func.chunk.push_bytes(&[name_constant]);
+
+        self.var_def(name_constant);
+
+        self.consume(TokenKind::LeftBrace, "Expect '{' before class body.");
+
+        self.consume(TokenKind::RightBrace, "Expect '}' after class body.");
     }
 
     pub fn func_decl(&mut self) {
@@ -899,8 +928,27 @@ impl<'a> Parser<'a> {
         // if arg > u8::MAX as u16 {
         //     self.compiler.func.chunk.push_bytes(&arg.to_ne_bytes());
         // } else {
-        self.compiler.func.chunk.push_bytes(&[arg as u8]);
+        self.compiler.func.chunk.push_bytes(&[arg]);
         // }
+    }
+
+    pub fn dot(&mut self, can_assign: bool) {
+        self.consume(TokenKind::Ident, "Expect property name after '.'.");
+        let line = self.prev.line;
+
+        let name = self.compiler.func.chunk.push_constant(Value::alloc_str(self.prev.data, self.string_table, self.heap_objects));
+
+        if can_assign && self.advance_if(TokenKind::Eq) {
+            self.expression();
+            self.compiler.func.chunk.push_opcode(OpCode::WriteProperty, line);
+        } else {
+            self.compiler.func.chunk.push_opcode(OpCode::ReadProperty, line);
+        }
+
+        self.compiler.func.chunk.push_bytes(&[name])
+
+
+
     }
 }
 

@@ -22,7 +22,7 @@ impl Entry {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Table {
     count: u32,
     pub entries: Box<[Option<Entry>]>,
@@ -45,7 +45,7 @@ impl Table {
         hasher.finish()
     }
 
-    fn find_mut(&mut self, key: &'static str) -> &mut Option<Entry> {
+    fn find_idx(&self, key:&'static str) -> usize {
         let capacity = self.entries.len();
 
         let mut idx = Self::hash(key) as usize % capacity;
@@ -77,12 +77,20 @@ impl Table {
                         idx
                     };
 
-                    return &mut self.entries[i];
+                    return i;
                 }
             }
 
             idx = (idx + 1) % capacity;
         }
+    }
+
+    fn find_mut(&mut self, key: &'static str) -> &mut Option<Entry> {
+        &mut self.entries[self.find_idx(key)]
+    }
+
+    fn find(&self, key: &'static str) -> &Option<Entry> {
+        &self.entries[self.find_idx(key)]
     }
 
     pub fn insert(&mut self, key: LoxStr, val: Value) -> bool {
@@ -139,6 +147,14 @@ impl Table {
         }
 
         self.find_mut(key).as_mut().map(|x| &mut x.val)
+    }
+
+    pub fn get_ref(&self, key: &'static str) -> Option<&Value> {
+        if self.count == 0 {
+            return None;
+        }
+
+        self.find(key).as_ref().map(|x| &x.val)
     }
 
     pub fn remove(&mut self, key: &'static str) -> bool {
