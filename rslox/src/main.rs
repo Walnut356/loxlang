@@ -2,7 +2,7 @@
 use rslox::{init_tracing, repl, run_file, value::Value, vm::InterpretError};
 use tracing::Level;
 
-const LOG_LEVEL: Level = Level::TRACE;
+const LOG_LEVEL: Level = Level::INFO;
 
 fn main() -> Result<(), InterpretError> {
     init_tracing(LOG_LEVEL);
@@ -12,48 +12,28 @@ fn main() -> Result<(), InterpretError> {
     args.next();
 
     if let Some(file_path) = args.next() {
-        run_file(&file_path)
+        if file_path == "bench" {
+            bench()
+        } else {
+            run_file(&file_path)
+        }
     } else {
         repl()
     }
 }
 
-// #[cfg(test)]
-// mod tests {
-//     use rslox::*;
-//     use crate::*;
-//     #[test]
-//     fn fib_flat() -> Result<(), InterpretError> {
-//         init_log(Level::Info);
+fn bench() -> Result<(), InterpretError> {
+    run_file("./test/benchmark/binary_trees.lox")?;
+    run_file("./test/benchmark/equality.lox")?;
+    run_file("./test/benchmark/fib.lox")?;
+    run_file("./test/benchmark/instantiation.lox")?;
+    run_file("./test/benchmark/invocation.lox")?;
+    run_file("./test/benchmark/method_call.lox")?;
+    run_file("./test/benchmark/properties.lox")?;
+    run_file("./test/benchmark/string_equality.lox")?;
+    run_file("./test/benchmark/trees.lox")?;
+    run_file("./test/benchmark/zoo_batch.lox")?;
+    run_file("./test/benchmark/zoo.lox")?;
 
-//         run_file(r"C:\coding\Projects\learning\loxlang\test_files\fib.lox")
-//     }
-
-//     #[test]
-//     fn fib_func() -> Result<(), InterpretError> {
-//         init_log(Level::Info);
-
-//         run_file(r"C:\coding\Projects\learning\loxlang\test_files\fib_func.lox")
-//     }
-
-//     #[test]
-//     fn global_closure() -> Result<(), InterpretError> {
-//         init_log(Level::Info);
-
-//         run_file(r"C:\coding\Projects\learning\loxlang\test_files\global_closure.lox")
-//     }
-
-//     #[test]
-//     fn resolver() -> Result<(), InterpretError> {
-//         init_log(Level::Info);
-
-//         run_file(r"C:\coding\Projects\learning\loxlang\test_files\test_resolver.lox")
-//     }
-
-//     #[test]
-//     fn scope() -> Result<(), InterpretError> {
-//         init_log(Level::Info);
-
-//         run_file(r"C:\coding\Projects\learning\loxlang\test_files\scope.lox")
-//     }
-// }
+    Ok(())
+}

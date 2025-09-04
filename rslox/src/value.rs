@@ -2,6 +2,7 @@ use std::{
     alloc::{self, Layout, handle_alloc_error},
     ptr::{self, NonNull},
     time::UNIX_EPOCH,
+    fmt::Write,
 };
 
 use strum_macros::*;
@@ -9,10 +10,11 @@ use tracing::{Level, instrument};
 
 use crate::{chunk::Chunk, table::Table, vm::InterpretError};
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct Class {
     pub marked: bool,
     pub name: LoxStr,
+    pub methods: Table,
 }
 
 #[derive(Debug, Clone)]
@@ -26,6 +28,17 @@ impl Instance {
     pub fn class_name(&self) -> LoxStr {
         unsafe { self.class.as_ref().name }
     }
+
+    pub fn methods(&self) -> &Table {
+        unsafe { &self.class.as_ref().methods }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct BoundMethod {
+    pub marked: bool,
+    pub receiver: NonNull<Instance>,
+    pub method: NonNull<Closure>,
 }
 
 #[derive(Debug, Default)]
@@ -254,6 +267,7 @@ pub enum Value {
     UpValue(NonNull<UpVal>),
     Class(NonNull<Class>),
     Instance(NonNull<Instance>),
+    BoundMethod(NonNull<BoundMethod>),
 }
 
 impl Default for Value {
@@ -276,18 +290,27 @@ impl std::fmt::Display for Value {
             }),
             Value::UpValue(_) => write!(f, "<upval>"),
             Value::Class(x) => write!(f, "Class({:?})", unsafe { x.as_ref().name.str() }),
-            Value::Instance(x) => {write!(
-                f,
-                "Instance({:?} {{",
-                unsafe { x.as_ref().class.as_ref().name.str() },
-            )?;
-            for e in unsafe { x.as_ref().fields.entries.iter().flatten()} {
-                write!(f, "{}: {}, ", e.key.str(), e.val)?;
+            Value::Instance(x) => {
+                write!(f, "{}{{", unsafe {
+                    x.as_ref().class.as_ref().name.str()
+                },)?;
+
+                let mut output = String::new();
+                for e in unsafe { x.as_ref().fields.entries.iter().flatten() } {
+                    write!(output, "{}: {}, ", e.key.str(), e.val)?;
+                }
+
+                output.pop();
+                output.pop();
+
+                write!(f, "{}}}", output)
             }
-
-            write!(f, "}})")
-
-        },
+            Value::BoundMethod(x) => write!(
+                f,
+                "BoundMethod(class:{}, method:{})",
+                unsafe { x.as_ref().receiver.as_ref().class_name().str() },
+                Value::Closure(unsafe { x.as_ref().method })
+            ),
         }
     }
 }
@@ -301,20 +324,15 @@ impl std::fmt::Debug for Value {
             Self::NativeFn(arg0) => f.debug_tuple("NativeFn").field(arg0).finish(),
             Self::String(arg0) => f.debug_tuple("String").field(&format!("{}", arg0)).finish(),
             Self::Function(arg0) => f.debug_tuple("Function").field(arg0).finish(),
-            Self::Closure(arg0) => f.debug_tuple("Closure").field(arg0).finish(),
+            Self::Closure(arg0) => f.debug_tuple("Closure").field(&unsafe{arg0.as_ref().func.as_ref().name}).finish(),
             Self::UpValue(arg0) => f.debug_tuple("UpValue").field(arg0).finish(),
-            Self::Class(arg0) => f.debug_tuple("Class").field(arg0).finish(),
-            Self::Instance(arg0) => {
-                let inst = unsafe { arg0.as_ref() };
-                let class = unsafe { inst.class.as_ref() };
-                let mut x = f.debug_struct(class.name.str());
-                for field in inst.fields.entries.iter().flatten() {
-                    x.field(field.key.str(), &field.val);
-                }
-
-                x.finish()
-            }
-
+            Self::Class(arg0) => f.debug_tuple("Class").field(&unsafe{arg0.as_ref().name.str()}).finish(),
+            Self::Instance(arg0) => f.debug_tuple("Instance").field(arg0).finish(),
+            Self::BoundMethod(x) => f
+                .debug_tuple("BoundMethod")
+                .field(&unsafe { x.as_ref().receiver.as_ref().class_name() })
+                .field(&unsafe { x.as_ref().method.as_ref().func.as_ref().name })
+                .finish(),
         }
     }
 }
@@ -327,6 +345,7 @@ impl PartialEq for Value {
             (Self::Float(l0), Self::Float(r0)) => l0 == r0,
             (Self::String(l0), Self::String(r0)) => std::ptr::addr_eq(l0.0.as_ptr(), r0.0.as_ptr()),
             (Self::Class(l0), Self::Class(r0)) => (*l0).addr() == (*r0).addr(),
+            (Self::BoundMethod(l0), Self::BoundMethod(r0)) => l0.addr() == r0.addr(),
             _ => false,
         }
     }
@@ -356,9 +375,11 @@ impl Value {
             Value::UpValue(_) => size_of::<UpVal>(),
             Value::Class(_) => size_of::<Class>(),
             Value::Instance(_) => size_of::<Instance>(),
+            Value::BoundMethod(_) => size_of::<BoundMethod>(),
         }
     }
 
+    #[instrument(level=Level::TRACE, skip(string_table, heap_objects))]
     pub fn alloc_str(src: &str, string_table: &mut Table, heap_objects: &mut Vec<Value>) -> Self {
         if src.is_empty() {
             // we intentionally don't add the empty string to the heap object or string table
@@ -379,6 +400,7 @@ impl Value {
         }
     }
 
+    #[instrument(level=Level::TRACE, skip(string_table, heap_objects))]
     pub fn alloc_string(
         src: String,
         string_table: &mut Table,
@@ -403,7 +425,7 @@ impl Value {
         }
     }
 
-    // #[instrument(level = Level::TRACE, skip(heap_objects))]
+    #[instrument(level = Level::TRACE, skip(heap_objects))]
     pub fn alloc_func(heap_objects: &mut Vec<Value>) -> NonNull<Function> {
         let func = Box::leak(Box::new(Function::default()));
         let func = unsafe { NonNull::new_unchecked(func) };
@@ -444,6 +466,7 @@ impl Value {
         let class = Box::leak(Box::new(Class {
             marked: false,
             name,
+            methods: Table::new(),
         }));
         let class = unsafe { NonNull::new_unchecked(class) };
         heap_objects.push(Value::Class(class));
@@ -451,7 +474,10 @@ impl Value {
         class
     }
 
-    pub fn alloc_instance(class: NonNull<Class>, heap_objects: &mut Vec<Value>) -> NonNull<Instance> {
+    pub fn alloc_instance(
+        class: NonNull<Class>,
+        heap_objects: &mut Vec<Value>,
+    ) -> NonNull<Instance> {
         let inst = Box::leak(Box::new(Instance {
             marked: false,
             class,
@@ -461,6 +487,22 @@ impl Value {
         heap_objects.push(Value::Instance(inst));
 
         inst
+    }
+
+    pub fn alloc_bound_method(
+        receiver: NonNull<Instance>,
+        method: NonNull<Closure>,
+        heap_objects: &mut Vec<Value>,
+    ) -> NonNull<BoundMethod> {
+        let bm = Box::leak(Box::new(BoundMethod {
+            marked: false,
+            receiver,
+            method,
+        }));
+        let bm: NonNull<BoundMethod> = unsafe { NonNull::new_unchecked(bm) };
+        heap_objects.push(Value::BoundMethod(bm));
+
+        bm
     }
 
     #[instrument(level = Level::TRACE)]
@@ -483,7 +525,10 @@ impl Value {
             },
             Value::Instance(i) => unsafe {
                 let _ = Box::from_raw(i.as_ptr());
-            }
+            },
+            Value::BoundMethod(b) => unsafe {
+                let _ = Box::from_raw(b.as_ptr());
+            },
             _ => (),
         }
     }

@@ -36,6 +36,7 @@ pub struct Parser<'a> {
     string_table: &'a mut Table,
     heap_objects: &'a mut Vec<Value>,
     pub compiler: Compiler,
+    pub class_compiler: Option<ClassCompiler>,
     curr: Token,
     prev: Token,
     pub scanner: Scanner,
@@ -55,6 +56,7 @@ impl<'a> Parser<'a> {
             string_table,
             heap_objects,
             compiler,
+            class_compiler: Default::default(),
             curr: scanner.next_token(),
             prev: Token {
                 kind: TokenKind::EOF,
@@ -132,6 +134,8 @@ impl<'a> Parser<'a> {
             TokenKind::False | TokenKind::True | TokenKind::Nil => self.literal(),
             TokenKind::String => self.string(),
             TokenKind::Ident => self.variable(can_assign),
+            TokenKind::This => self.this(),
+            TokenKind::Super => self.super_(),
             _ => (),
         }
     }
@@ -284,6 +288,8 @@ impl<'a> Parser<'a> {
 
     pub fn class_decl(&mut self) {
         self.consume(TokenKind::Ident, "Expect class name");
+        let class_name = self.prev.data;
+
         let name_constant = self.compiler.func.chunk.push_constant(Value::alloc_str(
             self.prev.data,
             self.string_table,
@@ -301,9 +307,150 @@ impl<'a> Parser<'a> {
 
         self.var_def(name_constant);
 
+        let mut cc = Some(ClassCompiler::default());
+
+        std::mem::swap(&mut cc, &mut self.class_compiler);
+
+        self.class_compiler.as_mut().unwrap().parent = cc.as_mut().map(|x| x as *mut _);
+
+        if self.advance_if(TokenKind::Lt) {
+            self.consume(TokenKind::Ident, "Expect superclass name.");
+            self.variable(false);
+
+            if class_name == self.prev.data {
+                self.log_error(&self.prev, "Class cannot inheret itself");
+                self.panic = true;
+                self.errors = true;
+            }
+
+            self.compiler.scope_depth += 1;
+
+            // super dumb, but it works. self.add_local() operates on self.prev without advancing,
+            // so since we're adding a synthetic token, we just replace self.prev temporarily
+            let temp = self.prev.clone();
+            self.prev = Token {
+                kind: TokenKind::Super,
+                data: "super",
+                line: temp.line,
+            };
+            self.add_local();
+            self.var_def(0);
+
+            self.prev = temp;
+
+            self.named_variable(class_name, false);
+            self.compiler
+                .func
+                .chunk
+                .push_opcode(OpCode::Inherit, self.prev.line);
+
+            self.class_compiler.as_mut().unwrap().has_superclass = true;
+        }
+
+        self.named_variable(class_name, false);
+
         self.consume(TokenKind::LeftBrace, "Expect '{' before class body.");
 
+        while !self.eof() && self.curr.kind != TokenKind::RightBrace {
+            self.method();
+        }
+
         self.consume(TokenKind::RightBrace, "Expect '}' after class body.");
+
+        self.compiler
+            .func
+            .chunk
+            .push_opcode(OpCode::Pop, self.prev.line);
+
+        if self
+            .class_compiler
+            .as_ref()
+            .is_some_and(|x| x.has_superclass)
+        {
+            self.end_scope();
+        }
+
+        std::mem::swap(&mut cc, &mut self.class_compiler);
+    }
+
+    pub fn method(&mut self) {
+        self.consume(TokenKind::Ident, "Expect method name");
+
+        let constant = self.compiler.func.chunk.push_constant(Value::alloc_str(
+            self.prev.data,
+            self.string_table,
+            self.heap_objects,
+        ));
+
+        let kind = if self.prev.data == "init" {
+            FuncKind::Initializer
+        } else {
+            FuncKind::Method
+        };
+
+        self.function(kind);
+        self.compiler
+            .func
+            .chunk
+            .push_opcode(OpCode::Method, self.prev.line);
+        self.compiler.func.chunk.push_bytes(&[constant]);
+    }
+
+    pub fn super_(&mut self) {
+        self.consume(TokenKind::Dot, "Expect '.' after 'super'.");
+        self.consume(TokenKind::Ident, "Expect superclass method name.");
+
+        let name = self.compiler.func.chunk.push_constant(Value::alloc_str(
+            self.prev.data,
+            self.string_table,
+            self.heap_objects,
+        ));
+
+        self.named_variable("this", false);
+
+        if self.advance_if(TokenKind::LeftParen) {
+            let arg_count = self.argument_list();
+            self.named_variable("super", false);
+            self.compiler
+                .func
+                .chunk
+                .push_opcode(OpCode::SuperInvoke, self.prev.line);
+            self.compiler.func.chunk.push_bytes(&[name, arg_count]);
+        } else {
+            self.named_variable("super", false);
+            self.compiler
+                .func
+                .chunk
+                .push_opcode(OpCode::Super, self.prev.line);
+            self.compiler.func.chunk.push_bytes(&[name]);
+        }
+
+        if self.class_compiler.is_none() {
+            self.log_error(&self.prev, "Can't use 'super' outside of a class.");
+            self.errors = true;
+            self.panic = true;
+        } else if self
+            .class_compiler
+            .as_ref()
+            .is_some_and(|x| !x.has_superclass)
+        {
+            self.log_error(
+                &self.prev,
+                "Can't use 'super' in a class with no superclass.",
+            );
+            self.errors = true;
+            self.panic = true;
+        }
+    }
+
+    pub fn this(&mut self) {
+        if self.class_compiler.is_none() {
+            self.log_error(&self.prev, "Can't use 'this' outside of a class.");
+            self.panic = true;
+            self.errors = true;
+            return;
+        }
+        self.variable(false);
     }
 
     pub fn func_decl(&mut self) {
@@ -328,6 +475,14 @@ impl<'a> Parser<'a> {
 
         if kind != FuncKind::Script {
             inner_compiler.func.name = self.prev.data;
+            if matches!(kind, FuncKind::Method | FuncKind::Initializer) {
+                inner_compiler.locals[0].name = Token {
+                    kind: TokenKind::This,
+                    data: "this",
+                    line: self.prev.line,
+                };
+                inner_compiler.locals[0].depth = inner_compiler.scope_depth;
+            }
         }
 
         std::mem::swap(&mut self.compiler, &mut inner_compiler);
@@ -342,6 +497,7 @@ impl<'a> Parser<'a> {
                     self.log_error(&self.prev, "Can't have more than 255 parameters.");
                     self.errors = true;
                     self.panic = true;
+                    return;
                 }
 
                 self.compiler.func.arg_count += 1;
@@ -360,11 +516,18 @@ impl<'a> Parser<'a> {
 
         self.block();
 
-        self.compiler
-            .func
-            .chunk
-            .push_opcode(OpCode::Nil, self.prev.line);
-
+        if kind == FuncKind::Initializer {
+            self.compiler
+                .func
+                .chunk
+                .push_opcode(OpCode::ReadLocal, self.prev.line);
+            self.compiler.func.chunk.push_bytes(&[0]);
+        } else {
+            self.compiler
+                .func
+                .chunk
+                .push_opcode(OpCode::Nil, self.prev.line);
+        }
         self.compiler
             .func
             .chunk
@@ -380,7 +543,7 @@ impl<'a> Parser<'a> {
             .func
             .chunk
             .push_constant(Value::Function(inner_compiler.func.into()));
-        self.compiler.func.chunk.push_bytes(&[idx as u8]);
+        self.compiler.func.chunk.push_bytes(&[idx]);
 
         for i in 0..inner_compiler.func.upval_count {
             let val = &inner_compiler.upvalues[i as usize];
@@ -746,11 +909,24 @@ impl<'a> Parser<'a> {
         }
 
         if self.advance_if(TokenKind::Semicolon) {
-            self.compiler
-                .func
-                .chunk
-                .push_opcode(OpCode::Nil, self.prev.line);
+            if self.compiler.kind == FuncKind::Initializer {
+                self.compiler
+                    .func
+                    .chunk
+                    .push_opcode(OpCode::ReadLocal, self.prev.line);
+                self.compiler.func.chunk.push_bytes(&[0]);
+            } else {
+                self.compiler
+                    .func
+                    .chunk
+                    .push_opcode(OpCode::Nil, self.prev.line);
+            }
         } else {
+            if self.compiler.kind == FuncKind::Initializer {
+                self.log_error(&self.prev, "Can't reutrn a value from an initializer.");
+                self.panic = true;
+                self.errors = true;
+            }
             self.expression();
             self.consume(TokenKind::Semicolon, "Expect ';' after return value.");
         }
@@ -833,6 +1009,7 @@ impl<'a> Parser<'a> {
                     self.log_error(&self.prev, "Can't hvae more than 255 arguments.");
                     self.errors = true;
                     self.panic = true;
+                    return 0;
                 }
                 count += 1;
                 if !self.advance_if(TokenKind::Comma) {
@@ -884,8 +1061,8 @@ impl<'a> Parser<'a> {
         );
     }
 
-    pub fn variable(&mut self, can_assign: bool) {
-        let mut local_idx = self.compiler.resolve_local(self.prev.data);
+    pub fn named_variable(&mut self, name: &'static str, can_assign: bool) {
+        let mut local_idx = self.compiler.resolve_local(name);
 
         let (get_op, set_op) = match local_idx {
             Some(idx) => {
@@ -899,14 +1076,14 @@ impl<'a> Parser<'a> {
                 }
                 (OpCode::ReadLocal, OpCode::WriteLocal)
             }
-            None => match self.compiler.resolve_upvalue(self.prev.data) {
+            None => match self.compiler.resolve_upvalue(name) {
                 Some(idx) => {
                     local_idx = Some(idx);
                     (OpCode::ReadUpval, OpCode::WriteUpval)
                 }
                 None => {
                     local_idx = Some(self.compiler.func.chunk.push_constant(Value::alloc_str(
-                        self.prev.data,
+                        name,
                         self.string_table,
                         self.heap_objects,
                     )));
@@ -932,23 +1109,42 @@ impl<'a> Parser<'a> {
         // }
     }
 
+    pub fn variable(&mut self, can_assign: bool) {
+        self.named_variable(self.prev.data, can_assign);
+    }
+
     pub fn dot(&mut self, can_assign: bool) {
         self.consume(TokenKind::Ident, "Expect property name after '.'.");
         let line = self.prev.line;
 
-        let name = self.compiler.func.chunk.push_constant(Value::alloc_str(self.prev.data, self.string_table, self.heap_objects));
+        let name = self.compiler.func.chunk.push_constant(Value::alloc_str(
+            self.prev.data,
+            self.string_table,
+            self.heap_objects,
+        ));
 
         if can_assign && self.advance_if(TokenKind::Eq) {
             self.expression();
-            self.compiler.func.chunk.push_opcode(OpCode::WriteProperty, line);
+            self.compiler
+                .func
+                .chunk
+                .push_opcode(OpCode::WriteProperty, line);
+        } else if self.advance_if(TokenKind::LeftParen) {
+            let arg_count = self.argument_list();
+            self.compiler
+                .func
+                .chunk
+                .push_opcode(OpCode::Invoke, self.prev.line);
+            self.compiler.func.chunk.push_bytes(&[name, arg_count]);
+            return;
         } else {
-            self.compiler.func.chunk.push_opcode(OpCode::ReadProperty, line);
+            self.compiler
+                .func
+                .chunk
+                .push_opcode(OpCode::ReadProperty, line);
         }
 
         self.compiler.func.chunk.push_bytes(&[name])
-
-
-
     }
 }
 
@@ -981,6 +1177,8 @@ pub const UNINITIALIZED: u32 = u32::MAX;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FuncKind {
     Func,
+    Method,
+    Initializer,
     Script,
 }
 
@@ -1081,4 +1279,10 @@ impl Compiler {
             }
         }
     }
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct ClassCompiler {
+    pub parent: Option<*mut ClassCompiler>,
+    pub has_superclass: bool,
 }

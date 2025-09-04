@@ -45,10 +45,10 @@ impl Table {
         hasher.finish()
     }
 
-    fn find_idx(&self, key:&'static str) -> usize {
+    fn find_idx(&self, key: &'static str) -> usize {
         let capacity = self.entries.len();
 
-        let mut idx = Self::hash(key) as usize % capacity;
+        let mut idx = Self::hash(key) as usize & (capacity - 1);
         let mut tombstone_idx = usize::MAX;
 
         loop {
@@ -70,10 +70,10 @@ impl Table {
                 }) {
                     // return the first tombstone instead of the first empty if we passed a tombstone
                     let i = if tombstone_idx != usize::MAX {
-                        debug!("Fell back to tombstone for key {key} at index {idx}");
+                        // debug!("Fell back to tombstone for key {key} at index {idx}");
                         tombstone_idx
                     } else {
-                        debug!("Found key {key} at index {idx}");
+                        // debug!("Found key {key} at index {idx}");
                         idx
                     };
 
@@ -81,7 +81,7 @@ impl Table {
                 }
             }
 
-            idx = (idx + 1) % capacity;
+            idx = (idx + 1) & (capacity - 1);
         }
     }
 
@@ -107,14 +107,14 @@ impl Table {
             for entry in self.entries.iter().flatten() {
                 if !entry.is_tombstone() {
                     self.count += 1;
-                    let mut idx = Self::hash(entry.key.str()) as usize % new.len();
+                    let mut idx = Self::hash(entry.key.str()) as usize & (new.len() - 1);
                     loop {
                         match &mut new[idx] {
-                            Some(_) => idx += 1,
+                            Some(_) => idx = (idx + 1) & (new.len() - 1),
                             x => {
                                 *x = Some(entry.clone());
                                 break;
-                            },
+                            }
                         }
                     }
                 }
@@ -129,7 +129,7 @@ impl Table {
         }
 
         let new = entry.is_none();
-        debug!("overwriting {entry:?} with ({key}, {val})");
+        // debug!("overwriting {entry:?} with ({key}, {val})");
 
         *entry = Some(Entry { key, val });
 
@@ -178,7 +178,7 @@ impl Table {
             return None;
         }
 
-        let mut idx = Self::hash(key) as usize % capacity;
+        let mut idx = Self::hash(key) as usize & (capacity - 1);
 
         loop {
             {
@@ -194,7 +194,7 @@ impl Table {
                 }
             }
 
-            idx = (idx + 1) % capacity;
+            idx = (idx + 1) & (capacity - 1);
         }
     }
 

@@ -3,10 +3,10 @@ use crate::{
     compiler::Parser,
     stack::Stack,
     table::{Entry, Table},
-    value::{Closure, UpVal, Value},
+    value::{Class, Closure, LoxStr, UpVal, Value},
 };
 // use log::{Level, debug, error, log_enabled, trace};
-use std::{cmp::Ordering, collections::BTreeMap, fmt::Write, ptr::NonNull, rc::Rc};
+use std::{cmp::Ordering, collections::BTreeMap, fmt::Write, ptr::NonNull, rc::Rc, time::Instant};
 use thiserror::Error;
 use tracing::{Level, debug, error, instrument, trace};
 
@@ -84,6 +84,7 @@ pub struct VM {
     pub(crate) stack: Box<Stack<MAX_STACK>>,
     grey_stack: Vec<Value>,
     gc_stats: GCStats,
+    init_str: LoxStr,
 }
 
 // impl Drop for VM {
@@ -108,6 +109,7 @@ impl Default for VM {
             upvalues: Default::default(),
             grey_stack: Default::default(),
             gc_stats: GCStats::default(),
+            init_str: LoxStr::EMPTY,
         }
     }
 }
@@ -117,7 +119,7 @@ impl VM {
     /// Deallocates everything necessary and resets the VM back to a default state
     #[instrument(skip_all)]
     pub fn reset(&mut self) {
-        for o in &self.heap_objects {
+        for o in self.heap_objects.iter().rev() {
             o.dealloc();
         }
         self.heap_objects.clear();
@@ -212,6 +214,12 @@ impl VM {
         for o in &self.heap_objects {
             self.gc_stats.bytes_allocated += o.size();
         }
+
+        self.init_str = self.strings.get_key("init").unwrap_or_else(|| {
+            Value::alloc_str("init", &mut self.strings, &mut self.heap_objects)
+                .try_as_string()
+                .unwrap()
+        });
 
         trace!("{}", {
             let mut output = "Globals:\n".to_owned();
@@ -323,7 +331,7 @@ impl VM {
         match opcode {
             OpCode::Return => {
                 let result = self.stack.pop()?;
-                self.close_upval(self.sp() + 1);
+                self.close_upval(self.sp());
                 self.frame_count -= 1;
 
                 if self.frame_count == 0 {
@@ -336,9 +344,121 @@ impl VM {
             }
             OpCode::Class => {
                 let name = self.read_const()?;
+                if self.time_to_gc() {
+                    self.collect_garbage();
+                }
                 let class =
                     Value::alloc_class(name.try_as_string().unwrap(), &mut self.heap_objects);
                 self.stack.push(Value::Class(class))?;
+            }
+            OpCode::Inherit => {
+                let superclass = unsafe {
+                    self.stack
+                        .peek(1)
+                        .try_as_class()
+                        .ok_or_else(|| {
+                            InterpretError::RuntimeError(format!(
+                                "[cycle {}] Superclass must be a class. Got {}",
+                                self.clock,
+                                self.stack.peek(1)
+                            ))
+                        })?
+                        .as_ref()
+                };
+                let subclass = unsafe { self.stack.top().try_as_class().unwrap().as_mut() };
+
+                // this instruction is emitted before the subclass has any of its methods
+                // instantiated, therefore we don't need to bother inserting them 1 at a time or
+                // anything like that. Table doesn't allocate until it has at least 1 entry, so
+                // we don't waste any time "deallocating" the subclass method table either.
+                subclass.methods = superclass.methods.clone();
+
+                self.stack.pop()?;
+            }
+            OpCode::Super => {
+                // shouldn't need to check these since they're compiler generated
+                let name = self.read_const()?.try_as_string().unwrap();
+                let superclass = unsafe { self.stack.pop()?.try_as_class().unwrap().as_ref() };
+
+                match superclass.methods.get_ref(name.str()) {
+                    Some(x) => {
+                        if self.time_to_gc() {
+                            self.collect_garbage();
+                        }
+                        *self.stack.top_mut() = Value::BoundMethod(Value::alloc_bound_method(
+                            self.stack.peek(0).try_as_instance().unwrap(),
+                            x.try_as_closure().unwrap(),
+                            &mut self.heap_objects,
+                        ))
+                    }
+                    None => {
+                        return Err(InterpretError::RuntimeError(format!(
+                            "[cycle {}] Undefined property {} for class {}",
+                            self.clock,
+                            name.str(),
+                            superclass.name.str()
+                        )));
+                    }
+                }
+            }
+            OpCode::Method => {
+                let name = self.read_const()?.try_as_string().unwrap();
+                let method = self.stack.peek(0);
+                let class = self.stack.peek(1);
+                unsafe {
+                    class
+                        .try_as_class()
+                        .unwrap()
+                        .as_mut()
+                        .methods
+                        .insert(name, *method)
+                };
+
+                self.stack.pop()?;
+            }
+            OpCode::Invoke => {
+                let name = self.read_const()?.try_as_string().unwrap();
+                let arg_count = self.read_byte()? as usize;
+
+                if let Value::Instance(i) = *self.stack.peek(arg_count) {
+                    let inst = unsafe { i.as_ref() };
+                    if let Some(&f) = inst.fields.get_ref(name.str()) {
+
+
+                        match f {
+                            Value::Closure(c) => {
+                                self.stack.data[self.stack.cursor - arg_count - 1] = f;
+                                self.call(c, arg_count)?;
+                            }
+                            Value::BoundMethod(b) => unsafe {
+                                let bm = b.as_ref();
+                                self.stack.data[self.stack.cursor - arg_count - 1] = Value::Instance(bm.receiver);
+                                self.call(bm.method, arg_count)?;
+                            }
+                            _ => {
+                                return Err(InterpretError::RuntimeError(format!(
+                                    "[cycle {}] Cannot call non-function field '{}': {}.",
+                                    self.clock, name, f
+                                )));
+                            }
+                        }
+                    } else {
+                        self.invoke_from_class(inst.class, name, arg_count)?;
+                    }
+                } else {
+                    return Err(InterpretError::RuntimeError(format!(
+                        "[cycle {}] Attempt to call method on non-instance object {}",
+                        self.clock,
+                        self.stack.peek(0)
+                    )));
+                }
+            }
+            OpCode::SuperInvoke => {
+                let name = self.read_const()?.try_as_string().unwrap();
+                let arg_count = self.read_byte()? as usize;
+
+                let superclass = self.stack.pop()?.try_as_class().unwrap();
+                self.invoke_from_class(superclass, name, arg_count)?;
             }
             OpCode::ReadProperty => match *self.stack.top() {
                 Value::Instance(i) => {
@@ -347,14 +467,27 @@ impl VM {
 
                     match inst.fields.get_ref(field.str()) {
                         Some(x) => *self.stack.top_mut() = *x,
-                        None => {
-                            return Err(InterpretError::RuntimeError(format!(
-                                "[cycle {}] Undefined property {} for class {}",
-                                self.clock,
-                                field.str(),
-                                inst.class_name().str()
-                            )));
-                        }
+                        None => match inst.methods().get_ref(field.str()) {
+                            Some(x) => {
+                                if self.time_to_gc() {
+                                    self.collect_garbage();
+                                }
+                                *self.stack.top_mut() =
+                                    Value::BoundMethod(Value::alloc_bound_method(
+                                        i,
+                                        x.try_as_closure().unwrap(),
+                                        &mut self.heap_objects,
+                                    ))
+                            }
+                            None => {
+                                return Err(InterpretError::RuntimeError(format!(
+                                    "[cycle {}] Undefined property {} for class {}",
+                                    self.clock,
+                                    field.str(),
+                                    inst.class_name().str()
+                                )));
+                            }
+                        },
                     }
                 }
                 x => {
@@ -516,35 +649,26 @@ impl VM {
             }
             OpCode::Call => {
                 let arg_count = self.read_byte()? as usize;
-                match self.stack.peek(arg_count) {
-                    Value::Class(c) => {
+                match *self.stack.peek(arg_count) {
+                    Value::Class(c) => unsafe {
+                        let class = c.as_ref();
+                        if self.time_to_gc() {
+                            self.collect_garbage();
+                        }
                         self.stack.data[self.stack.cursor - arg_count - 1] =
-                            Value::Instance(Value::alloc_instance(*c, &mut self.heap_objects));
-                    }
-                    Value::Closure(c) => {
-                        let f = unsafe { c.as_ref().func };
-                        let fun = unsafe { f.as_ref() };
-                        if fun.arg_count != arg_count as u8 {
+                            Value::Instance(Value::alloc_instance(c, &mut self.heap_objects));
+
+                        if let Some(initializer) = class.methods.get_ref(self.init_str.str()) {
+                            let init = initializer.try_as_closure().unwrap();
+                            self.call(init, arg_count)?;
+                        } else if arg_count != 0 {
                             return Err(InterpretError::RuntimeError(format!(
-                                "[cycle: {}] Function({}) expects {} args, got {}.",
-                                self.clock, fun.name, fun.arg_count, arg_count
+                                "[cycle {}] Expected 0 arguments but got {}.",
+                                self.clock, arg_count
                             )));
                         }
-                        if self.frame_count == MAX_FRAMES {
-                            return Err(InterpretError::RuntimeError(format!(
-                                "[cycle: {}] Stack overflow",
-                                self.clock
-                            )));
-                        }
-
-                        self.frames[self.frame_count] =
-                            CallFrame::new(*c, self.stack.cursor - arg_count - 1);
-                        self.frame_count += 1;
-
-                        debug!("{}", fun.chunk.disassemble(fun.name));
-                        // debug!("{}", Self::print_stack(&self.stack, self.sp(), false));
-                        // return Ok(VMState::Running);
-                    }
+                    },
+                    Value::Closure(c) => self.call(c, arg_count)?,
                     Value::NativeFn(func) => {
                         let result = func(
                             &self.stack.data[self.stack.cursor - arg_count..self.stack.cursor],
@@ -552,6 +676,14 @@ impl VM {
                         self.stack.cursor -= arg_count;
                         *self.stack.top_mut() = result;
                     }
+                    Value::BoundMethod(b) => unsafe {
+                        let bm = b.as_ref();
+
+                        self.stack.data[self.stack.cursor - arg_count - 1] =
+                            Value::Instance(bm.receiver);
+
+                        self.call(bm.method, arg_count)?;
+                    },
                     x => {
                         return Err(InterpretError::RuntimeError(format!(
                             "[cycle: {}] Object '{x:?}' is not callable",
@@ -712,6 +844,47 @@ impl VM {
     //     Ok(self.chunk().constants[const_idx])
     // }
 
+    fn call(&mut self, c: NonNull<Closure>, arg_count: usize) -> Result<(), InterpretError> {
+        let f = unsafe { c.as_ref().func };
+        let fun = unsafe { f.as_ref() };
+        if fun.arg_count != arg_count as u8 {
+            return Err(InterpretError::RuntimeError(format!(
+                "[cycle: {}] Function({}) expects {} args, got {}.",
+                self.clock, fun.name, fun.arg_count, arg_count
+            )));
+        }
+        if self.frame_count == MAX_FRAMES {
+            return Err(InterpretError::RuntimeError(format!(
+                "[cycle: {}] Stack overflow",
+                self.clock
+            )));
+        }
+
+        self.frames[self.frame_count] = CallFrame::new(c, self.stack.cursor - arg_count - 1);
+        self.frame_count += 1;
+
+        debug!("{}", fun.chunk.disassemble(fun.name));
+
+        Ok(())
+    }
+
+    fn invoke_from_class(
+        &mut self,
+        class: NonNull<Class>,
+        name: LoxStr,
+        arg_count: usize,
+    ) -> Result<(), InterpretError> {
+        match unsafe { class.as_ref().methods.get_ref(name.str()) } {
+            Some(x) => self.call(x.try_as_closure().unwrap(), arg_count),
+            None => Err(InterpretError::RuntimeError(format!(
+                "[cycle {}] Undefined method {} for class {}",
+                self.clock,
+                name.str(),
+                unsafe { class.as_ref().name.str() }
+            ))),
+        }
+    }
+
     fn capture_upval(&mut self, slot: usize, val: NonNull<Value>) -> NonNull<UpVal> {
         match self.upvalues.get(&slot) {
             Some(v) => *v,
@@ -865,6 +1038,17 @@ impl VM {
 
                     // no point doing the check since strings can't create cycles anyway
                     class.name.mark();
+
+                    for entry in class.methods.entries.iter_mut().flatten() {
+                        entry.key.mark();
+
+                        if !entry.val.is_marked() {
+                            entry.val.mark();
+                            if entry.val.has_child_allocs() {
+                                self.grey_stack.push(entry.val);
+                            }
+                        }
+                    }
                 }
                 Value::Instance(mut i) => {
                     let inst = unsafe { i.as_mut() };
@@ -886,14 +1070,28 @@ impl VM {
                         }
                     }
                 }
+                Value::BoundMethod(mut b) => unsafe {
+                    let bm = b.as_mut();
+
+                    let rec = bm.receiver.as_mut();
+
+                    if !rec.marked {
+                        rec.marked = true;
+                        self.grey_stack.push(Value::Instance(bm.receiver));
+                    }
+
+                    // no point adding the method to the grey stack since it will be traced by the
+                    // receiver anyway
+                },
                 _ => (),
             }
         }
     }
 
     pub fn sweep(&mut self) {
-        let mut i = 0;
+        let start = Instant::now();
 
+        let mut i = 0;
         while i < self.heap_objects.len() {
             if self.heap_objects[i].is_marked() {
                 self.heap_objects[i].unmark();
@@ -905,9 +1103,14 @@ impl VM {
             self.gc_stats.bytes_allocated -= val.size();
             val.dealloc();
         }
+
+        let end = start.elapsed();
+
+        debug!("Sweep time: {:?}", end);
     }
 
     pub fn time_to_gc(&self) -> bool {
+        // return true;
         self.gc_stats.bytes_allocated > self.gc_stats.next_gc
     }
 

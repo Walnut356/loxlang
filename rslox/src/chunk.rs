@@ -53,6 +53,11 @@ pub enum OpCode {
     Class,
     WriteProperty,
     ReadProperty,
+    Method,
+    Invoke,
+    Inherit,
+    Super,
+    SuperInvoke,
 }
 
 impl OpCode {
@@ -71,12 +76,18 @@ impl OpCode {
             | OpCode::WriteUpval
             | OpCode::Class
             | OpCode::WriteProperty
-            | OpCode::ReadProperty => 2,
+            | OpCode::ReadProperty
+            | OpCode::Method
+            | OpCode::Super => 2,
             // OpCode::Constant16
             // | OpCode::DefGlobal16
             // | OpCode::ReadGlobal16
             // | OpCode::WriteGlobal16
-            OpCode::Jump | OpCode::JumpFalsey | OpCode::JumpTruthy | OpCode::JumpBack => 3,
+            OpCode::Jump
+            | OpCode::JumpFalsey
+            | OpCode::JumpTruthy
+            | OpCode::JumpBack
+            | OpCode::Invoke | OpCode::SuperInvoke => 3,
             OpCode::Return
             | OpCode::Negate
             | OpCode::Add
@@ -95,7 +106,8 @@ impl OpCode {
             | OpCode::LtEq
             | OpCode::Print
             | OpCode::Pop
-            | OpCode::CloseUpVal => 1,
+            | OpCode::CloseUpVal
+            | OpCode::Inherit => 1,
             // variable sized
             OpCode::Closure => usize::MAX,
         }
@@ -187,7 +199,9 @@ impl Chunk {
                 | OpCode::WriteGlobal
                 | OpCode::Class
                 | OpCode::ReadProperty
-                | OpCode::WriteProperty,
+                | OpCode::WriteProperty
+                | OpCode::Method
+                | OpCode::Super
             ) => {
                 let idx = self.data[offset + 1] as usize;
                 writeln!(
@@ -219,6 +233,14 @@ impl Chunk {
             // }
             Some(OpCode::Call) => {
                 writeln!(output, "Call ({} args)", self.data[offset + 1]).unwrap();
+            }
+            Some(OpCode::Invoke | OpCode::SuperInvoke) => {
+                let name = self.constants[self.data[offset + 1] as usize]
+                    .try_as_string()
+                    .unwrap()
+                    .str();
+                let arg_count = self.data[offset + 2];
+                writeln!(output, "Invoke Method <fn {}> ({} args)", name, arg_count).unwrap();
             }
             Some(OpCode::Closure) => {
                 let func = unsafe {
